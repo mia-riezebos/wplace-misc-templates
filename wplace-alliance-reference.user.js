@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.7
-// @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-fill for Wplace alliance assets and user profile pictures.
+// @version      0.5.8
+// @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-paint for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
   /*
    * Safety boundary:
    * - no fetch/XHR/WebSocket calls or direct backend access
-   * - paced auto-fill is only exposed for the 64x64 / 384x128 Alliance asset canvas
+   * - auto-paint is only exposed for the 64x64 / 384x128 Alliance asset canvas
    * - instant fill is only exposed for the local 16x16 user profile-picture draft
    * - both modes use visible editor controls; this script never clicks Save/Submit
    */
@@ -121,6 +121,7 @@
     paintRunId: 0,
     paintActive: false,
     paintPaused: false,
+    paintIntervalEnabled: true,
     paintDelay: 150,
     paintQueue: [],
     paintIndex: 0,
@@ -195,7 +196,11 @@
 
   function persistSettings() {
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ preserveView: state.preserveView }));
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+        preserveView: state.preserveView,
+        paintIntervalEnabled: state.paintIntervalEnabled,
+        paintDelay: state.paintDelay,
+      }));
     } catch (error) {
       console.warn(`${SCRIPT_ID}: unable to save settings`, error);
     }
@@ -205,6 +210,10 @@
     try {
       const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
       state.preserveView = Boolean(saved?.preserveView);
+      state.paintIntervalEnabled = saved?.paintIntervalEnabled !== false;
+      state.paintDelay = Number.isFinite(saved?.paintDelay)
+        ? Math.max(1, Math.min(5000, saved.paintDelay))
+        : 150;
     } catch (error) {
       console.warn(`${SCRIPT_ID}: unable to restore settings`, error);
     }
@@ -875,7 +884,7 @@
       await wait(50);
       if (isConnected()) {
         state.paintColor = null;
-        setStatus("Artboard restored; continuing auto-fill…");
+        setStatus("Artboard restored; continuing auto-paint…");
         return true;
       }
     }
@@ -984,12 +993,13 @@
     const start = document.getElementById(`${PANEL_ID}-paint-start`);
     const pause = document.getElementById(`${PANEL_ID}-paint-pause`);
     const stop = document.getElementById(`${PANEL_ID}-paint-stop`);
+    const interval = document.getElementById(`${PANEL_ID}-paint-interval`);
     const delay = document.getElementById(`${PANEL_ID}-paint-delay`);
     const label = document.getElementById(`${PANEL_ID}-paint-label`);
     const progress = document.getElementById(`${PANEL_ID}-progress`);
     if (start) {
       start.disabled = state.paintActive || !state.target;
-      start.textContent = state.editorKind === "profile" ? "Fill now" : "Auto-fill";
+      start.textContent = state.editorKind === "profile" ? "Fill now" : "Auto-paint";
     }
     if (label) label.textContent = state.editorKind === "profile" ? "Local fill" : "Paint queue";
     if (pause) {
@@ -997,14 +1007,18 @@
       pause.textContent = state.paintPaused ? "Resume" : "Pause";
     }
     if (stop) stop.disabled = !state.paintActive;
-    if (delay && document.activeElement !== delay) delay.value = String(state.paintDelay);
+    if (interval) interval.checked = state.paintIntervalEnabled;
+    if (delay) {
+      delay.disabled = !state.paintIntervalEnabled;
+      if (document.activeElement !== delay) delay.value = String(state.paintDelay);
+    }
     if (progress) {
       const ratio = state.paintQueue.length ? state.paintIndex / state.paintQueue.length : 0;
       progress.style.transform = `scaleX(${Math.max(0, Math.min(1, ratio))})`;
     }
   }
 
-  function stopAutoFill(message = "Auto-fill stopped.") {
+  function stopAutoFill(message = "Auto-paint stopped.") {
     state.paintRunId += 1;
     state.paintActive = false;
     state.paintPaused = false;
@@ -1091,7 +1105,7 @@
       && location.pathname.replace(/\/+$/, "") === "/profile-picture"
       && editorKey() === PROFILE_SIZE;
     if (!state.root?.isConnected || (!isAlliance && !isProfile)) {
-      setStatus("Auto-fill is only available inside a supported Wplace asset editor.", "warn");
+      setStatus("Auto-paint is only available inside a supported Wplace asset editor.", "warn");
       return;
     }
 
@@ -1108,7 +1122,10 @@
       await startProfileFill(queue);
       return;
     }
-    if (!window.confirm(`Queue ${queue.length.toLocaleString()} alliance-editor pixels at ${state.paintDelay} ms per pixel?`)) {
+    const intervalDescription = state.paintIntervalEnabled
+      ? `with a ${state.paintDelay} ms interval`
+      : "with no added interval";
+    if (!window.confirm(`Auto-paint ${queue.length.toLocaleString()} alliance-editor pixels ${intervalDescription}?`)) {
       return;
     }
     if (!ensurePaintTool()) {
@@ -1132,7 +1149,7 @@
       if (runId !== state.paintRunId) return;
       if (!await waitForAllianceArtboard(runId)) {
         if (runId !== state.paintRunId) return;
-        stopAutoFill("Wplace did not restore the alliance artboard; auto-fill stopped.");
+        stopAutoFill("Wplace did not restore the alliance artboard; auto-paint stopped.");
         return;
       }
       if (state.paintNeedsRevalidation) {
@@ -1171,12 +1188,12 @@
       if (state.paintIndex % 10 === 0 || state.paintIndex === state.paintQueue.length) {
         syncPaintControls();
         setStatus(
-          `Auto-fill ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()} · `
+          `Auto-paint ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()} · `
           + `${paintedCount.toLocaleString()} painted · ${skippedCount.toLocaleString()} skipped.`,
         );
       }
       if (state.paintIndex % 25 === 0) renderOverlay();
-      await wait(state.paintDelay);
+      if (state.paintIntervalEnabled) await wait(state.paintDelay);
     }
 
     if (runId === state.paintRunId) {
@@ -1186,7 +1203,7 @@
       syncPaintControls();
       renderOverlay();
       setStatus(
-        `Auto-fill complete: ${paintedCount.toLocaleString()} painted, `
+        `Auto-paint complete: ${paintedCount.toLocaleString()} painted, `
         + `${skippedCount.toLocaleString()} already filled or protected.`,
       );
     }
@@ -1345,6 +1362,7 @@
         outline-offset: 2px;
       }
       #${PANEL_ID} button:disabled { cursor: default; opacity: 0.42; transform: none; }
+      #${PANEL_ID} input:disabled { cursor: default; opacity: 0.42; }
       #${PANEL_ID} .waa-primary { background: var(--waa-accent); border-color: var(--waa-accent); color: #f8fbff; font-weight: 700; }
       #${PANEL_ID} .waa-primary:hover { background: #0b66df; }
       #${PANEL_ID} .waa-quiet { border-color: transparent; background: transparent; color: var(--waa-muted); }
@@ -1463,12 +1481,14 @@
         <section class="waa-group waa-paint">
           <div class="waa-group-label" id="${PANEL_ID}-paint-label">Paint queue</div>
           <div class="waa-row">
-            <label class="waa-alliance-only" for="${PANEL_ID}-paint-delay">Pace</label>
-            <input class="waa-alliance-only" id="${PANEL_ID}-paint-delay" type="number" min="5" max="5000" step="5" value="150">
+            <label class="waa-check waa-alliance-only" title="Add a delay after every confirmed paint event">
+              <input id="${PANEL_ID}-paint-interval" type="checkbox" checked> Interval
+            </label>
+            <input class="waa-alliance-only" id="${PANEL_ID}-paint-delay" aria-label="Auto-paint interval in milliseconds" type="number" min="1" max="5000" step="1" value="150">
             <span class="waa-note waa-alliance-only">ms</span>
             <span class="waa-grow waa-alliance-only"></span>
             <span class="waa-note waa-grow waa-profile-only">Local draft · Wplace Save submits</span>
-            <button class="waa-primary" id="${PANEL_ID}-paint-start" type="button">Auto-fill</button>
+            <button class="waa-primary" id="${PANEL_ID}-paint-start" type="button">Auto-paint</button>
             <button class="waa-alliance-only" id="${PANEL_ID}-paint-pause" type="button" disabled>Pause</button>
             <button class="waa-quiet waa-alliance-only" id="${PANEL_ID}-paint-stop" type="button" disabled>Stop</button>
           </div>
@@ -1522,8 +1542,8 @@
       persistTarget();
       setStatus(
         state.onlyUnpainted
-          ? "Auto-fill will only paint fully transparent editor pixels."
-          : "Auto-fill may replace pixels whose colors differ.",
+          ? "Auto-paint will only paint fully transparent editor pixels."
+          : "Auto-paint may replace pixels whose colors differ.",
       );
     });
     panel.querySelector(`#${PANEL_ID}-preserve-view`).addEventListener("change", (event) => {
@@ -1538,16 +1558,27 @@
     });
     panel.querySelector(`#${PANEL_ID}-refresh`).addEventListener("click", renderOverlay);
     panel.querySelector(`#${PANEL_ID}-clear`).addEventListener("click", clearTarget);
+    panel.querySelector(`#${PANEL_ID}-paint-interval`).addEventListener("change", (event) => {
+      state.paintIntervalEnabled = event.target.checked;
+      persistSettings();
+      syncPaintControls();
+      setStatus(
+        state.paintIntervalEnabled
+          ? `Auto-paint interval enabled at ${state.paintDelay} ms.`
+          : "Auto-paint interval disabled; paint events will run without an added delay.",
+      );
+    });
     panel.querySelector(`#${PANEL_ID}-paint-delay`).addEventListener("change", (event) => {
-      state.paintDelay = Math.max(5, Math.min(5000, Number(event.target.value) || 150));
+      state.paintDelay = Math.max(1, Math.min(5000, Number(event.target.value) || 150));
       event.target.value = String(state.paintDelay);
+      persistSettings();
     });
     panel.querySelector(`#${PANEL_ID}-paint-start`).addEventListener("click", startAutoFill);
     panel.querySelector(`#${PANEL_ID}-paint-pause`).addEventListener("click", () => {
       if (!state.paintActive) return;
       state.paintPaused = !state.paintPaused;
       syncPaintControls();
-      setStatus(state.paintPaused ? "Auto-fill paused." : "Auto-fill resumed.");
+      setStatus(state.paintPaused ? "Auto-paint paused." : "Auto-paint resumed.");
     });
     panel.querySelector(`#${PANEL_ID}-paint-stop`).addEventListener("click", () => stopAutoFill());
     panel.querySelector(`#${PANEL_ID}-collapse`).addEventListener("click", () => {
@@ -1577,7 +1608,7 @@
       || state.height !== editor.height;
     if (!changedEditor && document.getElementById(PANEL_ID) && state.overlayCanvas?.isConnected) return;
 
-    if (state.paintActive && !sameAsset) stopAutoFill("The asset editor changed; auto-fill stopped.");
+    if (state.paintActive && !sameAsset) stopAutoFill("The asset editor changed; auto-paint stopped.");
     if (state.paintActive && sameAsset && changedEditor) state.paintNeedsRevalidation = true;
     if (sameAsset) state.paintColor = null;
 
