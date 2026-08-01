@@ -45,4 +45,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" wplace-alliance-reference.user.js --clobber
+        run: >-
+          gh release upload "$RELEASE_TAG" wplace-alliance-reference.user.js
+          --repo "$GITHUB_REPOSITORY" --clobber
