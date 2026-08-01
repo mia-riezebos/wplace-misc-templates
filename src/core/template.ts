@@ -2,7 +2,7 @@ import {
   type Color,
   type Rgb,
   colorFromRgb,
-  paletteMap,
+  liveColorForTemplateRgb,
 } from "./palette.ts";
 
 export type EditorKind = "alliance" | "profile";
@@ -15,14 +15,15 @@ export interface PixelImage {
 
 export function resolveEditorColor(
   kind: EditorKind,
-  palette: ReadonlyMap<string, Color>,
+  liveColors: readonly Color[],
   red: number,
   green: number,
   blue: number,
 ): Color | null {
-  const exact = palette.get(`${red},${green},${blue}`);
-  if (exact) return exact;
-  return kind === "profile" ? colorFromRgb([red, green, blue] as Rgb) : null;
+  const rgb = [red, green, blue] as Rgb;
+  return kind === "profile"
+    ? colorFromRgb(rgb)
+    : liveColorForTemplateRgb(liveColors, rgb);
 }
 
 export function validateTemplatePixels(
@@ -30,21 +31,19 @@ export function validateTemplatePixels(
   kind: EditorKind,
   colors: readonly Color[],
 ): string | null {
-  const palette = paletteMap(colors);
   for (let y = 0; y < image.height; y += 1) {
     for (let x = 0; x < image.width; x += 1) {
       const index = (y * image.width + x) * 4;
-      const alpha = image.data[index + 3];
+      const alpha = image.data[index + 3] ?? 0;
       if (alpha === 0) continue;
       if (alpha !== 255) {
         return `Pixel ${x}, ${y} is partially transparent; use only fully transparent or opaque pixels.`;
       }
-      const red = image.data[index];
-      const green = image.data[index + 1];
-      const blue = image.data[index + 2];
-      const rgb = `${red},${green},${blue}`;
-      if (kind === "alliance" && !palette.has(rgb)) {
-        return `Pixel ${x}, ${y} uses rgb(${rgb.replaceAll(",", ", ")}), which is not a current Wplace palette color.`;
+      const red = image.data[index] ?? 0;
+      const green = image.data[index + 1] ?? 0;
+      const blue = image.data[index + 2] ?? 0;
+      if (kind === "alliance" && !resolveEditorColor(kind, colors, red, green, blue)) {
+        return `Pixel ${x}, ${y} uses rgb(${red}, ${green}, ${blue}), which is not a supported Wplace template color.`;
       }
     }
   }

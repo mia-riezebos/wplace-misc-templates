@@ -82,6 +82,18 @@ export const CURRENT_WPLACE_PALETTE: readonly Color[] = CURRENT_WPLACE_COLORS.ma
   ([name, hex]) => colorFromHex(name, hex),
 );
 
+const TEMPLATE_COLOR_INDEX_BY_RGB = new Map(
+  CURRENT_WPLACE_PALETTE.map((color, index) => [color.rgb.join(","), index]),
+);
+
+// Ditherette still emits Wplace's former Teal bytes. It occupies the same
+// canonical palette slot as the current live Teal, so keep the source bytes
+// intact while translating that slot at the editor boundary.
+TEMPLATE_COLOR_INDEX_BY_RGB.set(
+  "16,174,130",
+  TEMPLATE_COLOR_INDEX_BY_RGB.get("16,174,166")!,
+);
+
 export function colorKey(color: Color): string {
   return color.rgb.join(",");
 }
@@ -101,6 +113,16 @@ export function parseCssRgb(cssColor: string): Rgb | null {
 
 export function colorFromRgb(rgb: Rgb, name: string | null = null): Color {
   return { name, rgb };
+}
+
+export function liveColorForTemplateRgb(
+  liveColors: readonly Color[],
+  rgb: Rgb,
+): Color | null {
+  const key = rgb.join(",");
+  const templateIndex = TEMPLATE_COLOR_INDEX_BY_RGB.get(key);
+  if (templateIndex !== undefined) return liveColors[templateIndex] || null;
+  return liveColors.find((color) => colorKey(color) === key) || null;
 }
 
 export function paletteMap(colors: readonly Color[]): ReadonlyMap<string, Color> {

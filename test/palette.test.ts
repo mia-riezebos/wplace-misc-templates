@@ -17,6 +17,7 @@ function fakeButton(rgb: string, label: string, selected: boolean): HTMLButtonEl
     style: { backgroundColor: rgb },
     dataset: {},
     classList: { contains: (name: string) => classes.has(name) },
+    hasAttribute: (name: string) => name === "aria-pressed",
     getAttribute: (name: string) => {
       if (name === "aria-label") return label;
       if (name === "aria-pressed") return selected ? "true" : "false";
@@ -30,7 +31,7 @@ function fakeRoot(buttons: readonly HTMLButtonElement[]): HTMLElement {
   return { closest: () => container } as unknown as HTMLElement;
 }
 
-test("current Wplace Teal is exact and the stale Teal is rejected", () => {
+test("the live Wplace palette keeps the current Teal RGB", () => {
   const colors = paletteMap(CURRENT_WPLACE_PALETTE);
   assert.equal(colors.get("16,174,166")?.name, "Teal");
   assert.equal(colors.has("16,174,130"), false);

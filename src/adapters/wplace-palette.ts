@@ -27,6 +27,7 @@ function isSelected(button: HTMLButtonElement): boolean {
 export function readPaletteSwatches(root: HTMLElement | null): readonly PaletteSwatch[] {
   return [...paletteContainer(root).querySelectorAll<HTMLButtonElement>("button[aria-label]")]
     .flatMap((button) => {
+      if (!button.hasAttribute("aria-pressed")) return [];
       const rgb = parseCssRgb(button.style.backgroundColor);
       if (!rgb) return [];
       return [{
@@ -39,7 +40,7 @@ export function readPaletteSwatches(root: HTMLElement | null): readonly PaletteS
 
 export function alliancePalette(root: HTMLElement | null): readonly Color[] {
   const live = readPaletteSwatches(root).map(({ color }) => color);
-  return live.length ? live : CURRENT_WPLACE_PALETTE;
+  return live.length >= CURRENT_WPLACE_PALETTE.length ? live : CURRENT_WPLACE_PALETTE;
 }
 
 export function selectedPaletteColor(root: HTMLElement | null): Color | null {

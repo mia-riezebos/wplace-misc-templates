@@ -4,7 +4,6 @@ import {
   colorHex,
   colorKey,
   colorLabel,
-  paletteMap,
 } from "./core/palette.ts";
 import { type PaintPath, orderPaintItems } from "./core/paint-path.ts";
 import { resolveEditorColor, validateTemplatePixels } from "./core/template.ts";
@@ -65,7 +64,6 @@ import {
     paintFailureMessage: null,
     paintNeedsRevalidation: false,
     paletteColors: [],
-    paletteByRgb: new Map(),
     pickerRoot: null,
     pickerPointerHandler: null,
     pickerAuxHandler: null,
@@ -81,14 +79,12 @@ import {
   function activeAlliancePalette() {
     if (!state.paletteColors.length) {
       state.paletteColors = [...alliancePalette(state.root)];
-      state.paletteByRgb = paletteMap(state.paletteColors);
     }
     return state.paletteColors;
   }
 
   function editorColor(r, g, b) {
-    activeAlliancePalette();
-    return resolveEditorColor(state.editorKind, state.paletteByRgb, r, g, b);
+    return resolveEditorColor(state.editorKind, activeAlliancePalette(), r, g, b);
   }
 
   function paletteColorAt(imageData, x, y) {
@@ -1720,7 +1716,6 @@ import {
     state.width = editor.width;
     state.height = editor.height;
     state.paletteColors = [...alliancePalette(editor.root)];
-    state.paletteByRgb = paletteMap(state.paletteColors);
     state.viewportRestoring = true;
     try {
       await restorePreservedViewport(editor.root, editor.frame);
