@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.3
+// @version      0.5.4
 // @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-fill for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
@@ -107,6 +107,7 @@
     width: 0,
     height: 0,
     opacity: 0.55,
+    displayMode: "full",
     mismatchesOnly: false,
     onlyUnpainted: false,
     preserveView: false,
@@ -581,6 +582,7 @@
           height: state.target.height,
           name: state.sourceName,
           opacity: state.opacity,
+          displayMode: state.displayMode,
           mismatchesOnly: state.mismatchesOnly,
           onlyUnpainted: state.onlyUnpainted,
         }),
@@ -610,6 +612,7 @@
       }
       state.sourceName = saved.name || "reference";
       state.opacity = Number.isFinite(saved.opacity) ? saved.opacity : 0.55;
+      state.displayMode = saved.displayMode === "center" ? "center" : "full";
       state.mismatchesOnly = Boolean(saved.mismatchesOnly);
       state.onlyUnpainted = Boolean(saved.onlyUnpainted);
       syncControls();
@@ -624,11 +627,13 @@
   function renderOverlay() {
     const canvas = state.overlayCanvas;
     if (!canvas) return;
-    const context = canvas.getContext("2d", { willReadFrequently: true });
-    context.clearRect(0, 0, canvas.width, canvas.height);
     canvas.style.opacity = String(state.opacity);
     canvas.style.display = state.hidden ? "none" : "block";
-    if (!state.target || state.hidden) return;
+    if (!state.target) {
+      canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
+    if (state.hidden) return;
 
     const output = new ImageData(new Uint8ClampedArray(state.target.data), state.width, state.height);
     if (state.mismatchesOnly) {
@@ -652,7 +657,30 @@
       }
     }
 
-    context.putImageData(output, 0, 0);
+    const scale = state.displayMode === "center" ? 3 : 1;
+    const renderWidth = state.width * scale;
+    const renderHeight = state.height * scale;
+    if (canvas.width !== renderWidth) canvas.width = renderWidth;
+    if (canvas.height !== renderHeight) canvas.height = renderHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    if (scale === 1) {
+      context.putImageData(output, 0, 0);
+    } else {
+      const centered = context.createImageData(renderWidth, renderHeight);
+      for (let y = 0; y < state.height; y += 1) {
+        for (let x = 0; x < state.width; x += 1) {
+          const source = (y * state.width + x) * 4;
+          if (output.data[source + 3] === 0) continue;
+          const target = ((y * 3 + 1) * renderWidth + x * 3 + 1) * 4;
+          centered.data[target] = output.data[source];
+          centered.data[target + 1] = output.data[source + 1];
+          centered.data[target + 2] = output.data[source + 2];
+          centered.data[target + 3] = output.data[source + 3];
+        }
+      }
+      context.putImageData(centered, 0, 0);
+    }
     const visiblePixels = countVisiblePixels(output);
     if (!state.paintActive) {
       setStatus(
@@ -1120,6 +1148,7 @@
   function syncControls() {
     const opacity = document.getElementById(`${PANEL_ID}-opacity`);
     const opacityValue = document.getElementById(`${PANEL_ID}-opacity-value`);
+    const displayMode = document.getElementById(`${PANEL_ID}-display-mode`);
     const mismatch = document.getElementById(`${PANEL_ID}-mismatch`);
     const onlyUnpainted = document.getElementById(`${PANEL_ID}-only-unpainted`);
     const preserveView = document.getElementById(`${PANEL_ID}-preserve-view`);
@@ -1129,6 +1158,7 @@
     const templateNote = document.getElementById(`${PANEL_ID}-template-note`);
     if (opacity) opacity.value = String(Math.round(state.opacity * 100));
     if (opacityValue) opacityValue.textContent = `${Math.round(state.opacity * 100)}%`;
+    if (displayMode) displayMode.value = state.displayMode;
     if (mismatch) mismatch.checked = state.mismatchesOnly;
     if (onlyUnpainted) onlyUnpainted.checked = state.onlyUnpainted;
     if (preserveView) preserveView.checked = state.preserveView;
@@ -1263,7 +1293,7 @@
       }
       #${PANEL_ID} button:hover { background: color-mix(in srgb, Canvas 83%, CanvasText 17%); }
       #${PANEL_ID} button:active { transform: translateY(1px); }
-      #${PANEL_ID} button:focus-visible, #${PANEL_ID} input:focus-visible {
+      #${PANEL_ID} button:focus-visible, #${PANEL_ID} select:focus-visible, #${PANEL_ID} input:focus-visible {
         outline: 2px solid color-mix(in srgb, var(--waa-accent) 72%, transparent);
         outline-offset: 2px;
       }
@@ -1276,6 +1306,7 @@
         padding: 3px 6px;
         font-variant-numeric: tabular-nums;
       }
+      #${PANEL_ID} select { max-width: 100%; padding: 3px 24px 3px 7px; }
       #${PANEL_ID} input[type="range"] { flex: 1; min-width: 64px; accent-color: var(--waa-accent); }
       #${PANEL_ID} .waa-check { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
       #${PANEL_ID} .waa-grow { flex: 1; }
@@ -1371,6 +1402,11 @@
             <button id="${PANEL_ID}-visibility" type="button">Hide</button>
           </div>
           <div class="waa-row">
+            <label for="${PANEL_ID}-display-mode">Display</label>
+            <select id="${PANEL_ID}-display-mode" title="Choose how much of each template pixel is shown">
+              <option value="full">Full pixel</option>
+              <option value="center">Center ⅓</option>
+            </select>
             <label class="waa-check waa-grow" title="Hide target pixels that already match the editor canvas">
               <input id="${PANEL_ID}-mismatch" type="checkbox"> Only differences
             </label>
@@ -1381,7 +1417,7 @@
           <div class="waa-group-label" id="${PANEL_ID}-paint-label">Paint queue</div>
           <div class="waa-row">
             <label class="waa-alliance-only" for="${PANEL_ID}-paint-delay">Pace</label>
-            <input class="waa-alliance-only" id="${PANEL_ID}-paint-delay" type="number" min="50" max="5000" step="25" value="150">
+            <input class="waa-alliance-only" id="${PANEL_ID}-paint-delay" type="number" min="5" max="5000" step="5" value="150">
             <span class="waa-note waa-alliance-only">ms</span>
             <span class="waa-grow waa-alliance-only"></span>
             <span class="waa-note waa-grow waa-profile-only">Local draft · Wplace Save submits</span>
@@ -1424,6 +1460,11 @@
       syncControls();
       renderOverlay();
     });
+    panel.querySelector(`#${PANEL_ID}-display-mode`).addEventListener("change", (event) => {
+      state.displayMode = event.target.value === "center" ? "center" : "full";
+      persistTarget();
+      renderOverlay();
+    });
     panel.querySelector(`#${PANEL_ID}-mismatch`).addEventListener("change", (event) => {
       state.mismatchesOnly = event.target.checked;
       persistTarget();
@@ -1451,7 +1492,7 @@
     panel.querySelector(`#${PANEL_ID}-refresh`).addEventListener("click", renderOverlay);
     panel.querySelector(`#${PANEL_ID}-clear`).addEventListener("click", clearTarget);
     panel.querySelector(`#${PANEL_ID}-paint-delay`).addEventListener("change", (event) => {
-      state.paintDelay = Math.max(50, Math.min(5000, Number(event.target.value) || 150));
+      state.paintDelay = Math.max(5, Math.min(5000, Number(event.target.value) || 150));
       event.target.value = String(state.paintDelay);
     });
     panel.querySelector(`#${PANEL_ID}-paint-start`).addEventListener("click", startAutoFill);

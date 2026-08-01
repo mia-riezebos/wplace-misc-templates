@@ -11,7 +11,7 @@ Install Tampermonkey or Violentmonkey, then [install the latest userscript](http
 - Exact-size overlays for alliance profile pictures (64×64), alliance banners (384×128), and user profile pictures (16×16)
 - Byte-exact PNG colors with no resizing, fitting, or dithering
 - Wplace palette validation for alliance assets; any opaque 8-bit RGB color for user profile pictures
-- Adjustable opacity and a differences-only overlay
+- Full-pixel or center-third display, adjustable opacity, and a differences-only overlay
 - Middle-click a template pixel to select its editor color
 - Paced alliance auto-fill and instant local user-profile fill
 - Optional fill of transparent pixels only
