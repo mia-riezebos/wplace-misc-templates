@@ -1,9 +1,10 @@
 import { build } from "esbuild";
+import packageJson from "../package.json" with { type: "json" };
 
 const metadata = `// ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.6.0
+// @version      ${packageJson.version}
 // @description  Byte-exact overlays, spatial paint paths, and editor-only auto-paint for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
