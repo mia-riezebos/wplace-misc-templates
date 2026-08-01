@@ -6,6 +6,10 @@ import {
   colorLabel,
 } from "./core/palette.ts";
 import { type PaintPath, orderPaintItems } from "./core/paint-path.ts";
+import {
+  ALLIANCE_EDITOR_RECYCLE_EVENTS,
+  shouldRecycleAllianceEditor,
+} from "./core/paint-session.ts";
 import { shouldRefreshMismatchOverlay } from "./core/paint-feedback.ts";
 import { resolveEditorColor, validateTemplatePixels } from "./core/template.ts";
 import {
@@ -22,6 +26,7 @@ import {
    * - both modes use visible editor controls; this script never clicks Save/Submit
    */
 
+  const SCRIPT_VERSION = __WAA_VERSION__;
   const SCRIPT_ID = "waa-reference-overlay";
   const PANEL_ID = `${SCRIPT_ID}-panel`;
   const OVERLAY_CLASS = `${SCRIPT_ID}-canvas`;
@@ -32,6 +37,7 @@ import {
   const SYNTHETIC_POINTER_ID = 9471;
   const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
   const ALLIANCE_REFRESH_GRACE_MS = 15000;
+  const ALLIANCE_NATURAL_REFRESH_WAIT_MS = 6000;
   const UNPACED_BATCH_SIZE = 50;
 
   const state = {
@@ -824,6 +830,100 @@ import {
     return false;
   }
 
+  function visibleEnabledButtons(root, label) {
+    return [...root.querySelectorAll("button")].filter((button) => (
+      !button.disabled
+      && button.getClientRects().length > 0
+      && (
+        button.textContent.trim() === label
+        || button.getAttribute("aria-label") === label
+      )
+    ));
+  }
+
+  async function recycleAllianceEditor(runId) {
+    let recycleRoot = state.root;
+    if (!recycleRoot?.isConnected || !recycleRoot.closest("dialog")) return false;
+
+    setStatus("Waiting for Wplace to commit and refresh the editor…");
+    const naturalRefreshDeadline = Date.now() + ALLIANCE_NATURAL_REFRESH_WAIT_MS;
+    while (runId === state.paintRunId && Date.now() < naturalRefreshDeadline) {
+      queueScan();
+      await wait(50);
+      if (
+        state.root !== recycleRoot
+        && state.root?.isConnected
+        && state.baseCanvas?.isConnected
+        && state.editorKind === "alliance"
+      ) {
+        recycleRoot = state.root;
+        setStatus("Wplace committed the burst; resetting its editor session…");
+        break;
+      }
+    }
+    if (runId !== state.paintRunId || !recycleRoot?.isConnected) return false;
+
+    // An artboard replacement keeps Wplace's in-memory stroke history. Leave
+    // and reopen the exact draft to actually clear that growing history.
+    const editorChromeDeadline = Date.now() + ALLIANCE_REFRESH_GRACE_MS;
+    let dialog = null;
+    let backButton = null;
+    while (runId === state.paintRunId && Date.now() < editorChromeDeadline) {
+      dialog = recycleRoot.closest("dialog");
+      const backButtons = dialog ? visibleEnabledButtons(dialog, "Back") : [];
+      if (backButtons.length === 1) {
+        backButton = backButtons[0];
+        break;
+      }
+      await wait(50);
+    }
+    if (runId !== state.paintRunId || !dialog || !backButton) return false;
+
+    captureAllianceViewport();
+    const revision = dialog.textContent.match(/Revision\s+\d+/i)?.[0] || null;
+
+    setStatus(
+      `Reopening Wplace's editor after ${ALLIANCE_EDITOR_RECYCLE_EVENTS.toLocaleString()} events…`,
+    );
+    backButton.click();
+
+    const studioDeadline = Date.now() + ALLIANCE_REFRESH_GRACE_MS;
+    let continueButton = null;
+    while (runId === state.paintRunId && Date.now() < studioDeadline) {
+      const candidates = [...dialog.querySelectorAll("button")].filter((button) => (
+        !button.disabled
+        && button.getClientRects().length > 0
+        && button.textContent.includes("Continue painting")
+      ));
+      const revisionMatches = revision
+        ? candidates.filter((button) => button.textContent.includes(revision))
+        : [];
+      if (revisionMatches.length === 1) continueButton = revisionMatches[0];
+      else if (candidates.length === 1) continueButton = candidates[0];
+      if (continueButton) break;
+      await wait(50);
+    }
+    if (runId !== state.paintRunId || !continueButton) return false;
+    continueButton.click();
+
+    const editorDeadline = Date.now() + ALLIANCE_REFRESH_GRACE_MS;
+    while (runId === state.paintRunId && Date.now() < editorDeadline) {
+      queueScan();
+      await wait(50);
+      if (
+        state.root !== recycleRoot
+        && state.root?.isConnected
+        && state.baseCanvas?.isConnected
+        && state.editorKind === "alliance"
+      ) {
+        state.paintColor = null;
+        setStatus("Wplace editor reset; continuing auto-paint…");
+        return true;
+      }
+    }
+    return false;
+  }
+
   function withSyntheticPointerCapture(root, callback) {
     const originalDescriptor = root
       ? Object.getOwnPropertyDescriptor(root, "setPointerCapture")
@@ -889,6 +989,7 @@ import {
     const dispatchedCanvas = state.baseCanvas;
     let dispatched = 0;
     for (const item of items) {
+      if (runId !== state.paintRunId) return { ok: true, dispatched, stopped: true };
       if (state.baseCanvas !== dispatchedCanvas || !dispatchedCanvas.isConnected) {
         return { ok: true, dispatched, refreshed: true };
       }
@@ -1046,15 +1147,6 @@ import {
       await startProfileFill(queue);
       return;
     }
-    const intervalDescription = state.paintIntervalEnabled
-      ? `with a ${state.paintDelay} ms interval`
-      : `in same-color batches of up to ${UNPACED_BATCH_SIZE}`;
-    const colorDescription = lockedColor ? ` matching the selected ${colorLabel(lockedColor)} swatch` : "";
-    if (!window.confirm(
-      `Auto-paint ${queue.length.toLocaleString()} alliance-editor pixels${colorDescription} ${intervalDescription}?`,
-    )) {
-      return;
-    }
     if (!ensurePaintTool()) {
       setStatus("Could not activate Wplace's alliance Paint tool.", "warn");
       return;
@@ -1069,6 +1161,7 @@ import {
     state.paintFailureMessage = null;
     syncPaintControls();
     let dispatchedCount = 0;
+    let dispatchedSinceRecycle = 0;
 
     while (state.paintIndex < state.paintQueue.length && runId === state.paintRunId) {
       while (state.paintPaused && runId === state.paintRunId) await wait(100);
@@ -1092,8 +1185,10 @@ import {
         batch.push(candidate);
       }
       const result = await dispatchPaintBatch(batch, runId);
+      if (runId !== state.paintRunId || result.stopped) return;
       if (result.dispatched) {
         dispatchedCount += result.dispatched;
+        dispatchedSinceRecycle += result.dispatched;
         state.paintIndex += result.dispatched;
       }
       if (result.refreshed) continue;
@@ -1114,6 +1209,25 @@ import {
         + `${dispatchedCount.toLocaleString()} events dispatched.`,
       );
       if (state.paintIntervalEnabled) await wait(state.paintDelay);
+
+      if (shouldRecycleAllianceEditor({
+        dispatchedSinceRecycle,
+        intervalEnabled: state.paintIntervalEnabled,
+        queueRemaining: state.paintQueue.length - state.paintIndex,
+      })) {
+        const recycled = await recycleAllianceEditor(runId);
+        if (runId !== state.paintRunId) return;
+        if (!recycled) {
+          state.paintPaused = true;
+          syncPaintControls();
+          setStatus(
+            "Could not reset Wplace's editor session. Paused; use Resume to retry.",
+            "warn",
+          );
+          continue;
+        }
+        dispatchedSinceRecycle = 0;
+      }
     }
 
     if (runId === state.paintRunId) {
@@ -1369,6 +1483,7 @@ import {
     panel.id = PANEL_ID;
     panel.dataset.collapsed = String(state.collapsed);
     panel.dataset.editor = state.editorKind;
+    panel.dataset.version = SCRIPT_VERSION;
     panel.innerHTML = `
       <div class="waa-head">
         <strong id="${PANEL_ID}-title">Reference</strong>

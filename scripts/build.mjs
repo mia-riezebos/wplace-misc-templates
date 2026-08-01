@@ -21,4 +21,5 @@ await build({
   target: "chrome120",
   legalComments: "none",
   banner: { js: metadata },
+  define: { __WAA_VERSION__: JSON.stringify(packageJson.version) },
 });
