@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.8
+// @version      0.5.9
 // @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-paint for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
@@ -30,6 +30,7 @@
   const SYNTHETIC_POINTER_ID = 9471;
   const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
   const ALLIANCE_REFRESH_GRACE_MS = 15000;
+  const UNPACED_BATCH_SIZE = 50;
 
   // Source of truth: https://github.com/mia-cx/ditherette/blob/main/src/lib/palette/wplace.ts
   const PALETTE = [
@@ -122,10 +123,13 @@
     paintActive: false,
     paintPaused: false,
     paintIntervalEnabled: true,
+    paintSelectedColorOnly: false,
     paintDelay: 150,
     paintQueue: [],
     paintIndex: 0,
     paintColor: null,
+    paintLockedColor: null,
+    paintFailureMessage: null,
     paintNeedsRevalidation: false,
     pickerRoot: null,
     pickerPointerHandler: null,
@@ -199,6 +203,7 @@
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
         preserveView: state.preserveView,
         paintIntervalEnabled: state.paintIntervalEnabled,
+        paintSelectedColorOnly: state.paintSelectedColorOnly,
         paintDelay: state.paintDelay,
       }));
     } catch (error) {
@@ -211,6 +216,7 @@
       const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
       state.preserveView = Boolean(saved?.preserveView);
       state.paintIntervalEnabled = saved?.paintIntervalEnabled !== false;
+      state.paintSelectedColorOnly = Boolean(saved?.paintSelectedColorOnly);
       state.paintDelay = Number.isFinite(saved?.paintDelay)
         ? Math.max(1, Math.min(5000, saved.paintDelay))
         : 150;
@@ -714,15 +720,49 @@
     return count;
   }
 
-  function visiblePaletteButton(color) {
+  function visiblePaletteButtons() {
     const container = state.root?.closest('[role="dialog"], dialog');
-    const buttons = [...(container || document).querySelectorAll("button[aria-label]")].filter((button) => (
+    return [...(container || document).querySelectorAll("button[aria-label]")].filter((button) => (
       button.offsetParent !== null && button.style.backgroundColor
     ));
-    return buttons.find((button) => {
-      const channels = button.style.backgroundColor.match(/\d+(?:\.\d+)?/g)?.slice(0, 3).map(Number);
-      return channels?.length === 3 && channels.every((channel, index) => channel === color.rgb[index]);
-    }) || null;
+  }
+
+  function paletteColorForButton(button) {
+    const channels = button?.style.backgroundColor.match(/\d+(?:\.\d+)?/g)?.slice(0, 3).map(Number);
+    return channels?.length === 3 ? PALETTE_BY_RGB.get(channels.join(",")) || null : null;
+  }
+
+  function visiblePaletteButton(color) {
+    return visiblePaletteButtons().find((button) => (
+      colorKey(paletteColorForButton(button) || { rgb: [] }) === colorKey(color)
+    )) || null;
+  }
+
+  function selectedPaletteColor() {
+    const selectedButton = visiblePaletteButtons().find((button) => (
+      button.getAttribute("aria-pressed") === "true"
+      || button.dataset.state === "active"
+      || button.dataset.selected === "true"
+      || (button.classList.contains("ring-2")
+        && (button.classList.contains("ring-primary") || button.classList.contains("border-primary")))
+    ));
+    return paletteColorForButton(selectedButton);
+  }
+
+  function preparePaintColor(color) {
+    state.paintFailureMessage = null;
+    if (state.paintSelectedColorOnly) {
+      const selected = selectedPaletteColor();
+      if (!selected || colorKey(selected) !== colorKey(color)) {
+        state.paintFailureMessage = selected
+          ? `Selected color changed to ${colorLabel(selected)}. Reselect ${colorLabel(color)} and use Resume.`
+          : `Could not confirm the selected Wplace color. Reselect ${colorLabel(color)} and use Resume.`;
+        return false;
+      }
+      state.paintColor = colorKey(color);
+      return true;
+    }
+    return state.paintColor === colorKey(color) || selectPaletteColor(color);
   }
 
   function selectPaletteColor(color, announce = false) {
@@ -829,7 +869,7 @@
     }
   }
 
-  function buildPaintQueue() {
+  function buildPaintQueue(onlyColor = null) {
     if (!state.target) return [];
     const buckets = new Map(
       state.editorKind === "alliance" ? PALETTE.map((color) => [colorKey(color), []]) : [],
@@ -852,6 +892,7 @@
           state.target.data[index], state.target.data[index + 1], state.target.data[index + 2],
         );
         if (!color) continue;
+        if (onlyColor && colorKey(color) !== colorKey(onlyColor)) continue;
         if (state.onlyUnpainted && actual[index + 3] !== 0) continue;
         const matches = pixelMatchesColor(actual, index, color);
         if (!matches) {
@@ -930,6 +971,35 @@
     return false;
   }
 
+  function canvasBatchDispositions(items) {
+    try {
+      const pixels = state.baseCanvas.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, state.width, state.height).data;
+      return items.map((item) => {
+        const index = (item.y * state.width + item.x) * 4;
+        if (pixelMatchesColor(pixels, index, item.color)) return "matches";
+        if (state.onlyUnpainted && pixels[index + 3] !== 0) return "protected";
+        return "paint";
+      });
+    } catch (error) {
+      console.warn(`${SCRIPT_ID}: could not read an editor pixel batch`, error);
+      return null;
+    }
+  }
+
+  async function waitForCanvasBatch(items, timeout = 5000) {
+    const deadline = Date.now() + timeout;
+    do {
+      if (state.paintNeedsRevalidation || !state.baseCanvas?.isConnected) return { refreshed: true };
+      const dispositions = canvasBatchDispositions(items);
+      if (dispositions?.every((value) => value === "matches" || value === "protected")) {
+        return { ok: true, dispositions };
+      }
+      await wait(35);
+    } while (Date.now() < deadline);
+    return { ok: false, dispositions: canvasBatchDispositions(items) };
+  }
+
   function dispatchPaintEvents(item) {
     const rect = state.baseCanvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
@@ -958,7 +1028,7 @@
   async function dispatchPaintPixel(item, runId) {
     while (state.viewportRestoring) await nextFrame();
     if (!await waitForAllianceArtboard(runId)) return false;
-    if (state.paintColor !== colorKey(item.color) && !selectPaletteColor(item.color)) return false;
+    if (!preparePaintColor(item.color)) return false;
     await wait(0);
     const beforeDispatch = canvasPixelDisposition(item);
     if (beforeDispatch === "matches" || beforeDispatch === "protected") return true;
@@ -970,7 +1040,7 @@
       const refreshedDisposition = canvasPixelDisposition(item);
       if (refreshedDisposition === "matches" || refreshedDisposition === "protected") return true;
       state.paintColor = null;
-      if (!selectPaletteColor(item.color)) return false;
+      if (!preparePaintColor(item.color)) return false;
       await wait(0);
       if (dispatchPaintEvents(item) && await waitForCanvasPixel(item)) return true;
     }
@@ -989,11 +1059,46 @@
     return waitForCanvasPixel(item);
   }
 
+  async function dispatchPaintBatch(items, runId) {
+    while (state.viewportRestoring) await nextFrame();
+    if (!await waitForAllianceArtboard(runId)) return { ok: false };
+    if (state.paintNeedsRevalidation) return { refreshed: true };
+    if (!preparePaintColor(items[0].color)) {
+      return { ok: false, message: state.paintFailureMessage };
+    }
+    await wait(0);
+
+    const before = canvasBatchDispositions(items);
+    if (!before) return { ok: false };
+    const paintItems = items.filter((item, index) => before[index] === "paint");
+    const skipped = items.length - paintItems.length;
+    const dispatchedCanvas = state.baseCanvas;
+    for (const item of paintItems) {
+      if (state.paintNeedsRevalidation || state.baseCanvas !== dispatchedCanvas || !dispatchedCanvas.isConnected) {
+        return { refreshed: true };
+      }
+      if (!dispatchPaintEvents(item)) return { ok: false, failedItem: item };
+    }
+
+    if (!paintItems.length) return { ok: true, painted: 0, skipped };
+    const confirmed = await waitForCanvasBatch(paintItems);
+    if (confirmed.refreshed) return confirmed;
+    if (!confirmed.ok) {
+      const failedIndex = confirmed.dispositions?.findIndex((value) => value === "paint") ?? -1;
+      return {
+        ok: false,
+        failedItem: paintItems[Math.max(0, failedIndex)],
+      };
+    }
+    return { ok: true, painted: paintItems.length, skipped };
+  }
+
   function syncPaintControls() {
     const start = document.getElementById(`${PANEL_ID}-paint-start`);
     const pause = document.getElementById(`${PANEL_ID}-paint-pause`);
     const stop = document.getElementById(`${PANEL_ID}-paint-stop`);
     const interval = document.getElementById(`${PANEL_ID}-paint-interval`);
+    const selectedColorOnly = document.getElementById(`${PANEL_ID}-selected-color-only`);
     const delay = document.getElementById(`${PANEL_ID}-paint-delay`);
     const label = document.getElementById(`${PANEL_ID}-paint-label`);
     const progress = document.getElementById(`${PANEL_ID}-progress`);
@@ -1008,6 +1113,10 @@
     }
     if (stop) stop.disabled = !state.paintActive;
     if (interval) interval.checked = state.paintIntervalEnabled;
+    if (selectedColorOnly) {
+      selectedColorOnly.checked = state.paintSelectedColorOnly;
+      selectedColorOnly.disabled = state.paintActive;
+    }
     if (delay) {
       delay.disabled = !state.paintIntervalEnabled;
       if (document.activeElement !== delay) delay.value = String(state.paintDelay);
@@ -1025,6 +1134,8 @@
     state.paintQueue = [];
     state.paintIndex = 0;
     state.paintColor = null;
+    state.paintLockedColor = null;
+    state.paintFailureMessage = null;
     state.paintNeedsRevalidation = false;
     syncPaintControls();
     if (message) setStatus(message);
@@ -1109,10 +1220,17 @@
       return;
     }
 
-    const queue = buildPaintQueue();
+    const lockedColor = isAlliance && state.paintSelectedColorOnly ? selectedPaletteColor() : null;
+    if (isAlliance && state.paintSelectedColorOnly && !lockedColor) {
+      setStatus("Select a visible Wplace palette color before starting selected-color auto-paint.", "warn");
+      return;
+    }
+    const queue = buildPaintQueue(lockedColor);
     if (!queue.length) {
       setStatus(
-        state.onlyUnpainted
+        lockedColor
+          ? `No ${colorLabel(lockedColor)} template pixels need painting.`
+          : state.onlyUnpainted
           ? "No transparent editor pixels need painting. Existing pixels were left untouched."
           : "This asset already matches the template.",
       );
@@ -1124,8 +1242,11 @@
     }
     const intervalDescription = state.paintIntervalEnabled
       ? `with a ${state.paintDelay} ms interval`
-      : "with no added interval";
-    if (!window.confirm(`Auto-paint ${queue.length.toLocaleString()} alliance-editor pixels ${intervalDescription}?`)) {
+      : `in same-color batches of up to ${UNPACED_BATCH_SIZE}`;
+    const colorDescription = lockedColor ? ` matching the selected ${colorLabel(lockedColor)} swatch` : "";
+    if (!window.confirm(
+      `Auto-paint ${queue.length.toLocaleString()} alliance-editor pixels${colorDescription} ${intervalDescription}?`,
+    )) {
       return;
     }
     if (!ensurePaintTool()) {
@@ -1139,6 +1260,8 @@
     state.paintActive = true;
     state.paintPaused = false;
     state.paintColor = null;
+    state.paintLockedColor = lockedColor;
+    state.paintFailureMessage = null;
     state.paintNeedsRevalidation = false;
     syncPaintControls();
     let paintedCount = 0;
@@ -1154,7 +1277,7 @@
       }
       if (state.paintNeedsRevalidation) {
         state.paintNeedsRevalidation = false;
-        state.paintQueue = buildPaintQueue();
+        state.paintQueue = buildPaintQueue(state.paintLockedColor);
         state.paintIndex = 0;
         state.paintColor = null;
         syncPaintControls();
@@ -1163,6 +1286,42 @@
       }
 
       const item = state.paintQueue[state.paintIndex];
+      if (!state.paintIntervalEnabled) {
+        const batch = [];
+        const batchColor = colorKey(item.color);
+        for (
+          let index = state.paintIndex;
+          index < state.paintQueue.length && batch.length < UNPACED_BATCH_SIZE;
+          index += 1
+        ) {
+          const candidate = state.paintQueue[index];
+          if (colorKey(candidate.color) !== batchColor) break;
+          batch.push(candidate);
+        }
+        const result = await dispatchPaintBatch(batch, runId);
+        if (result.refreshed) continue;
+        if (!result.ok) {
+          state.paintPaused = true;
+          syncPaintControls();
+          const failed = result.failedItem || item;
+          setStatus(
+            result.message
+              || `Could not confirm the batch near pixel ${failed.x}, ${failed.y}. Paused; use Resume to retry.`,
+            "warn",
+          );
+          continue;
+        }
+        paintedCount += result.painted;
+        skippedCount += result.skipped;
+        state.paintIndex += batch.length;
+        syncPaintControls();
+        setStatus(
+          `Auto-paint ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()} · `
+          + `${paintedCount.toLocaleString()} painted · ${skippedCount.toLocaleString()} skipped.`,
+        );
+        renderOverlay();
+        continue;
+      }
       const disposition = canvasPixelDisposition(item);
       let painted = disposition === "matches" || disposition === "protected";
       if (painted) skippedCount += 1;
@@ -1178,7 +1337,8 @@
         state.paintPaused = true;
         syncPaintControls();
         setStatus(
-          `Could not confirm pixel ${item.x}, ${item.y}. Paused; use Resume to retry.`,
+          state.paintFailureMessage
+            || `Could not confirm pixel ${item.x}, ${item.y}. Paused; use Resume to retry.`,
           "warn",
         );
         continue;
@@ -1200,6 +1360,8 @@
       state.paintActive = false;
       state.paintPaused = false;
       state.paintColor = null;
+      state.paintLockedColor = null;
+      state.paintFailureMessage = null;
       syncPaintControls();
       renderOverlay();
       setStatus(
@@ -1215,6 +1377,7 @@
     const displayMode = document.getElementById(`${PANEL_ID}-display-mode`);
     const mismatch = document.getElementById(`${PANEL_ID}-mismatch`);
     const onlyUnpainted = document.getElementById(`${PANEL_ID}-only-unpainted`);
+    const selectedColorOnly = document.getElementById(`${PANEL_ID}-selected-color-only`);
     const preserveView = document.getElementById(`${PANEL_ID}-preserve-view`);
     const visibility = document.getElementById(`${PANEL_ID}-visibility`);
     const title = document.getElementById(`${PANEL_ID}-title`);
@@ -1225,6 +1388,7 @@
     if (displayMode) displayMode.value = state.displayMode;
     if (mismatch) mismatch.checked = state.mismatchesOnly;
     if (onlyUnpainted) onlyUnpainted.checked = state.onlyUnpainted;
+    if (selectedColorOnly) selectedColorOnly.checked = state.paintSelectedColorOnly;
     if (preserveView) preserveView.checked = state.preserveView;
     if (visibility) visibility.textContent = state.hidden ? "Show" : "Hide";
     if (title) title.textContent = "Reference";
@@ -1340,6 +1504,7 @@
       }
       #${PANEL_ID} .waa-row { display: flex; min-width: 0; align-items: center; gap: 6px; }
       #${PANEL_ID} .waa-row + .waa-row { margin-top: 6px; }
+      #${PANEL_ID} .waa-paint-options { flex-wrap: wrap; }
       #${PANEL_ID} .waa-row > label:first-child { color: var(--waa-muted); }
       #${PANEL_ID} button, #${PANEL_ID} select, #${PANEL_ID} input[type="range"], #${PANEL_ID} input[type="number"] {
         min-height: 30px;
@@ -1492,10 +1657,14 @@
             <button class="waa-alliance-only" id="${PANEL_ID}-paint-pause" type="button" disabled>Pause</button>
             <button class="waa-quiet waa-alliance-only" id="${PANEL_ID}-paint-stop" type="button" disabled>Stop</button>
           </div>
-          <div class="waa-row">
-            <label class="waa-check waa-grow" title="Never overwrite a non-transparent editor pixel">
+          <div class="waa-row waa-paint-options">
+            <label class="waa-check" title="Never overwrite a non-transparent editor pixel">
               <input id="${PANEL_ID}-only-unpainted" type="checkbox"> Only unpainted pixels
             </label>
+            <label class="waa-check waa-alliance-only" title="Paint only template pixels matching the Wplace color selected when auto-paint starts">
+              <input id="${PANEL_ID}-selected-color-only" type="checkbox"> Only selected color
+            </label>
+            <span class="waa-grow waa-alliance-only"></span>
             <label class="waa-check waa-alliance-only" title="Restore zoom and canvas position when Wplace replaces the artboard">
               <input id="${PANEL_ID}-preserve-view" type="checkbox"> Keep view on refresh
             </label>
@@ -1544,6 +1713,15 @@
         state.onlyUnpainted
           ? "Auto-paint will only paint fully transparent editor pixels."
           : "Auto-paint may replace pixels whose colors differ.",
+      );
+    });
+    panel.querySelector(`#${PANEL_ID}-selected-color-only`).addEventListener("change", (event) => {
+      state.paintSelectedColorOnly = event.target.checked;
+      persistSettings();
+      setStatus(
+        state.paintSelectedColorOnly
+          ? "Auto-paint will use only the currently selected Wplace color and will not change swatches."
+          : "Auto-paint will select each required Wplace color automatically.",
       );
     });
     panel.querySelector(`#${PANEL_ID}-preserve-view`).addEventListener("change", (event) => {
