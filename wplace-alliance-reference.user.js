@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.5
+// @version      0.5.6
 // @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-fill for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
@@ -29,6 +29,7 @@
   const PROFILE_SIZE = "16x16";
   const SYNTHETIC_POINTER_ID = 9471;
   const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
+  const ALLIANCE_REFRESH_GRACE_MS = 15000;
 
   // Source of truth: https://github.com/mia-cx/ditherette/blob/main/src/lib/palette/wplace.ts
   const PALETTE = [
@@ -124,6 +125,7 @@
     paintQueue: [],
     paintIndex: 0,
     paintColor: null,
+    paintNeedsRevalidation: false,
     pickerRoot: null,
     pickerPointerHandler: null,
     pickerAuxHandler: null,
@@ -703,11 +705,13 @@
     return count;
   }
 
-  function visiblePaletteButton(colorName) {
-    return [...document.querySelectorAll("button[aria-label]")].find((button) => (
-      button.getAttribute("aria-label") === colorName
-      && button.offsetParent !== null
-    )) || null;
+  function visiblePaletteButton(color) {
+    const container = state.root?.closest('[role="dialog"], dialog');
+    const buttons = [...(container || document).querySelectorAll("button[aria-label]")].filter((button) => (
+      button.offsetParent !== null && button.style.backgroundColor
+    ));
+    const colorIndex = PALETTE.findIndex((candidate) => colorKey(candidate) === colorKey(color));
+    return buttons[colorIndex] || null;
   }
 
   function selectPaletteColor(color, announce = false) {
@@ -724,9 +728,9 @@
       if (announce) setStatus(`Selected ${colorLabel(color)} from the template.`);
       return true;
     }
-    const button = visiblePaletteButton(color.name);
+    const button = visiblePaletteButton(color);
     if (!button) {
-      setStatus(`Could not find Wplace's visible ${colorLabel(color)} palette button.`, "warn");
+      setStatus(`Could not find Wplace's indexed ${colorLabel(color)} palette swatch.`, "warn");
       return false;
     }
     button.click();
@@ -853,6 +857,29 @@
     return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
   }
 
+  async function waitForAllianceArtboard(runId) {
+    const isConnected = () => (
+      state.editorKind === "alliance"
+      && ALLIANCE_SIZES.has(editorKey())
+      && state.root?.isConnected
+      && state.baseCanvas?.isConnected
+    );
+    if (isConnected()) return true;
+
+    const deadline = Date.now() + ALLIANCE_REFRESH_GRACE_MS;
+    setStatus("Wplace refreshed the artboard; waiting for it to return…");
+    while (runId === state.paintRunId && Date.now() < deadline) {
+      queueScan();
+      await wait(50);
+      if (isConnected()) {
+        state.paintColor = null;
+        setStatus("Artboard restored; continuing auto-fill…");
+        return true;
+      }
+    }
+    return false;
+  }
+
   function withSyntheticPointerCapture(root, callback) {
     const originalDescriptor = root
       ? Object.getOwnPropertyDescriptor(root, "setPointerCapture")
@@ -917,8 +944,9 @@
     });
   }
 
-  async function dispatchPaintPixel(item) {
+  async function dispatchPaintPixel(item, runId) {
     while (state.viewportRestoring) await nextFrame();
+    if (!await waitForAllianceArtboard(runId)) return false;
     if (state.paintColor !== colorKey(item.color) && !selectPaletteColor(item.color)) return false;
     await wait(0);
     const beforeDispatch = canvasPixelDisposition(item);
@@ -981,6 +1009,7 @@
     state.paintQueue = [];
     state.paintIndex = 0;
     state.paintColor = null;
+    state.paintNeedsRevalidation = false;
     syncPaintControls();
     if (message) setStatus(message);
   }
@@ -997,6 +1026,7 @@
     state.paintActive = true;
     state.paintPaused = false;
     state.paintColor = null;
+    state.paintNeedsRevalidation = false;
     syncPaintControls();
     setStatus(`Filling ${queue.length.toLocaleString()} local draft pixels…`);
 
@@ -1090,6 +1120,7 @@
     state.paintActive = true;
     state.paintPaused = false;
     state.paintColor = null;
+    state.paintNeedsRevalidation = false;
     syncPaintControls();
     let paintedCount = 0;
     let skippedCount = 0;
@@ -1097,9 +1128,19 @@
     while (state.paintIndex < state.paintQueue.length && runId === state.paintRunId) {
       while (state.paintPaused && runId === state.paintRunId) await wait(100);
       if (runId !== state.paintRunId) return;
-      if (!state.root?.isConnected || !state.baseCanvas?.isConnected) {
-        stopAutoFill("The alliance editor changed; auto-fill stopped.");
+      if (!await waitForAllianceArtboard(runId)) {
+        if (runId !== state.paintRunId) return;
+        stopAutoFill("Wplace did not restore the alliance artboard; auto-fill stopped.");
         return;
+      }
+      if (state.paintNeedsRevalidation) {
+        state.paintNeedsRevalidation = false;
+        state.paintQueue = buildPaintQueue();
+        state.paintIndex = 0;
+        state.paintColor = null;
+        syncPaintControls();
+        if (!state.paintQueue.length) break;
+        setStatus(`Artboard restored; rechecked ${state.paintQueue.length.toLocaleString()} remaining pixels.`);
       }
 
       const item = state.paintQueue[state.paintIndex];
@@ -1107,7 +1148,7 @@
       let painted = disposition === "matches" || disposition === "protected";
       if (painted) skippedCount += 1;
       else {
-        painted = await dispatchPaintPixel(item);
+        painted = await dispatchPaintPixel(item, runId);
         if (painted) {
           const finalDisposition = canvasPixelDisposition(item);
           if (finalDisposition === "protected") skippedCount += 1;
@@ -1535,6 +1576,7 @@
     if (!changedEditor && document.getElementById(PANEL_ID) && state.overlayCanvas?.isConnected) return;
 
     if (state.paintActive && !sameAsset) stopAutoFill("The asset editor changed; auto-fill stopped.");
+    if (state.paintActive && sameAsset && changedEditor) state.paintNeedsRevalidation = true;
     if (sameAsset) state.paintColor = null;
 
     state.editorKind = editor.kind;
