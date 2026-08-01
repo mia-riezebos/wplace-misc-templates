@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.2
+// @version      0.5.3
 // @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-fill for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
@@ -28,6 +28,7 @@
   const ALLIANCE_SIZES = new Set(["64x64", "384x128"]);
   const PROFILE_SIZE = "16x16";
   const SYNTHETIC_POINTER_ID = 9471;
+  const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
 
   const PALETTE = [
     ["Black", 0, 0, 0],
@@ -126,6 +127,8 @@
     viewportRoot: null,
     viewportCaptureHandler: null,
     viewportRestoring: false,
+    statusMessage: "Load an image to begin.",
+    statusKind: "normal",
   };
 
   const PALETTE_BY_RGB = new Map(
@@ -201,6 +204,8 @@
   }
 
   function setStatus(message, kind = "normal") {
+    state.statusMessage = message;
+    state.statusKind = kind;
     const status = document.getElementById(`${PANEL_ID}-status`);
     if (!status) return;
     status.textContent = message;
@@ -636,10 +641,9 @@
             output.data[index + 3] = 0;
             continue;
           }
-          const matches = actual[index + 3] >= 64
-            && actual[index] === output.data[index]
-            && actual[index + 1] === output.data[index + 1]
-            && actual[index + 2] === output.data[index + 2];
+          const matches = pixelMatchesColor(actual, index, {
+            rgb: [output.data[index], output.data[index + 1], output.data[index + 2]],
+          });
           if (matches) output.data[index + 3] = 0;
         }
       } catch (error) {
@@ -755,17 +759,26 @@
     root.addEventListener("auxclick", suppressAuxClick, true);
   }
 
-  function canvasPixelMatches(item) {
+  function pixelMatchesColor(pixelData, index, color) {
+    if (pixelData[index + 3] !== 255) return false;
+    const redDelta = pixelData[index] - color.rgb[0];
+    const greenDelta = pixelData[index + 1] - color.rgb[1];
+    const blueDelta = pixelData[index + 2] - color.rgb[2];
+    if (redDelta === 0 && greenDelta === 0 && blueDelta === 0) return true;
+    return state.editorKind === "alliance"
+      && redDelta ** 2 + greenDelta ** 2 + blueDelta ** 2 <= ALLIANCE_COLOR_TOLERANCE_SQUARED;
+  }
+
+  function canvasPixelDisposition(item) {
     try {
       const pixel = state.baseCanvas.getContext("2d", { willReadFrequently: true })
         .getImageData(item.x, item.y, 1, 1).data;
-      return pixel[3] === 255
-        && pixel[0] === item.color.rgb[0]
-        && pixel[1] === item.color.rgb[1]
-        && pixel[2] === item.color.rgb[2];
+      if (pixelMatchesColor(pixel, 0, item.color)) return "matches";
+      if (state.onlyUnpainted && pixel[3] !== 0) return "protected";
+      return "paint";
     } catch (error) {
       console.warn(`${SCRIPT_ID}: could not read an editor pixel`, error);
-      return false;
+      return "unreadable";
     }
   }
 
@@ -793,10 +806,7 @@
         );
         if (!color) continue;
         if (state.onlyUnpainted && actual[index + 3] !== 0) continue;
-        const matches = actual[index + 3] === 255
-          && actual[index] === color.rgb[0]
-          && actual[index + 1] === color.rgb[1]
-          && actual[index + 2] === color.rgb[2];
+        const matches = pixelMatchesColor(actual, index, color);
         if (!matches) {
           const key = colorKey(color);
           if (!buckets.has(key)) buckets.set(key, []);
@@ -843,7 +853,8 @@
   async function waitForCanvasPixel(item, timeout = 5000) {
     const deadline = Date.now() + timeout;
     do {
-      if (canvasPixelMatches(item)) return true;
+      const disposition = canvasPixelDisposition(item);
+      if (disposition === "matches" || disposition === "protected") return true;
       await wait(35);
     } while (Date.now() < deadline);
     return false;
@@ -878,11 +889,15 @@
     while (state.viewportRestoring) await nextFrame();
     if (state.paintColor !== colorKey(item.color) && !selectPaletteColor(item.color)) return false;
     await wait(0);
+    const beforeDispatch = canvasPixelDisposition(item);
+    if (beforeDispatch === "matches" || beforeDispatch === "protected") return true;
     const dispatchedCanvas = state.baseCanvas;
     if (!dispatchPaintEvents(item)) return false;
     if (await waitForCanvasPixel(item)) return true;
 
     if (state.baseCanvas !== dispatchedCanvas && state.baseCanvas?.isConnected) {
+      const refreshedDisposition = canvasPixelDisposition(item);
+      if (refreshedDisposition === "matches" || refreshedDisposition === "protected") return true;
       state.paintColor = null;
       if (!selectPaletteColor(item.color)) return false;
       await wait(0);
@@ -959,7 +974,8 @@
         stopAutoFill("The profile editor changed; fill stopped.");
         return;
       }
-      if (canvasPixelMatches(item)) {
+      const disposition = canvasPixelDisposition(item);
+      if (disposition === "matches" || disposition === "protected") {
         state.paintIndex += 1;
         continue;
       }
@@ -969,6 +985,11 @@
           return;
         }
         await wait(0);
+      }
+      const selectedDisposition = canvasPixelDisposition(item);
+      if (selectedDisposition === "matches" || selectedDisposition === "protected") {
+        state.paintIndex += 1;
+        continue;
       }
       if (!dispatchPaintEvents(item)) {
         stopAutoFill(`Could not paint pixel ${item.x}, ${item.y}; fill stopped.`);
@@ -1038,6 +1059,8 @@
     state.paintPaused = false;
     state.paintColor = null;
     syncPaintControls();
+    let paintedCount = 0;
+    let skippedCount = 0;
 
     while (state.paintIndex < state.paintQueue.length && runId === state.paintRunId) {
       while (state.paintPaused && runId === state.paintRunId) await wait(100);
@@ -1048,7 +1071,17 @@
       }
 
       const item = state.paintQueue[state.paintIndex];
-      const painted = canvasPixelMatches(item) || await dispatchPaintPixel(item);
+      const disposition = canvasPixelDisposition(item);
+      let painted = disposition === "matches" || disposition === "protected";
+      if (painted) skippedCount += 1;
+      else {
+        painted = await dispatchPaintPixel(item);
+        if (painted) {
+          const finalDisposition = canvasPixelDisposition(item);
+          if (finalDisposition === "protected") skippedCount += 1;
+          else paintedCount += 1;
+        }
+      }
       if (!painted) {
         state.paintPaused = true;
         syncPaintControls();
@@ -1062,7 +1095,10 @@
       state.paintIndex += 1;
       if (state.paintIndex % 10 === 0 || state.paintIndex === state.paintQueue.length) {
         syncPaintControls();
-        setStatus(`Auto-fill ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()}.`);
+        setStatus(
+          `Auto-fill ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()} · `
+          + `${paintedCount.toLocaleString()} painted · ${skippedCount.toLocaleString()} skipped.`,
+        );
       }
       if (state.paintIndex % 25 === 0) renderOverlay();
       await wait(state.paintDelay);
@@ -1074,7 +1110,10 @@
       state.paintColor = null;
       syncPaintControls();
       renderOverlay();
-      setStatus(`Auto-fill complete: ${state.paintQueue.length.toLocaleString()} pixels.`);
+      setStatus(
+        `Auto-fill complete: ${paintedCount.toLocaleString()} painted, `
+        + `${skippedCount.toLocaleString()} already filled or protected.`,
+      );
     }
   }
 
@@ -1435,6 +1474,7 @@
 
     root.before(panel);
     syncControls();
+    setStatus(state.statusMessage, state.statusKind);
   }
 
   async function attach(editor) {
