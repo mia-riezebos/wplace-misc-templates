@@ -6,6 +6,10 @@ import {
   colorLabel,
 } from "./core/palette.ts";
 import { type PaintPath, orderPaintItems } from "./core/paint-path.ts";
+import {
+  ALLIANCE_EDITOR_RECYCLE_EVENTS,
+  shouldRecycleAllianceEditor,
+} from "./core/paint-session.ts";
 import { shouldRefreshMismatchOverlay } from "./core/paint-feedback.ts";
 import { resolveEditorColor, validateTemplatePixels } from "./core/template.ts";
 import {
@@ -33,6 +37,7 @@ import {
   const SYNTHETIC_POINTER_ID = 9471;
   const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
   const ALLIANCE_REFRESH_GRACE_MS = 15000;
+  const ALLIANCE_NATURAL_REFRESH_WAIT_MS = 7000;
   const UNPACED_BATCH_SIZE = 50;
 
   const state = {
@@ -902,6 +907,30 @@ import {
     return false;
   }
 
+  async function recycleAllianceEditor(runId) {
+    const burstRoot = state.root;
+    if (!burstRoot?.isConnected || !burstRoot.closest("dialog")) return false;
+
+    setStatus(
+      `Painted ${ALLIANCE_EDITOR_RECYCLE_EVENTS.toLocaleString()} pixels; `
+      + "waiting for Wplace's idle refresh…",
+    );
+    const deadline = Date.now() + ALLIANCE_NATURAL_REFRESH_WAIT_MS;
+    while (runId === state.paintRunId && Date.now() < deadline) {
+      queueScan();
+      await wait(50);
+      if (
+        state.root !== burstRoot
+        && state.root?.isConnected
+        && state.baseCanvas?.isConnected
+        && state.editorKind === "alliance"
+      ) {
+        return reopenAllianceEditorAfterRefresh(runId, state.root);
+      }
+    }
+    return false;
+  }
+
   function withSyntheticPointerCapture(root, callback) {
     const originalDescriptor = root
       ? Object.getOwnPropertyDescriptor(root, "setPointerCapture")
@@ -1139,6 +1168,7 @@ import {
     state.paintFailureMessage = null;
     syncPaintControls();
     let dispatchedCount = 0;
+    let dispatchedSinceRecycle = 0;
     let paintEditorRoot = state.root;
 
     while (state.paintIndex < state.paintQueue.length && runId === state.paintRunId) {
@@ -1182,6 +1212,7 @@ import {
       if (runId !== state.paintRunId || result.stopped) return;
       if (result.dispatched) {
         dispatchedCount += result.dispatched;
+        dispatchedSinceRecycle += result.dispatched;
         state.paintIndex += result.dispatched;
       }
       if (result.refreshed) continue;
@@ -1202,6 +1233,26 @@ import {
         + `${dispatchedCount.toLocaleString()} events dispatched.`,
       );
       if (state.paintIntervalEnabled) await wait(state.paintDelay);
+
+      if (shouldRecycleAllianceEditor({
+        dispatchedSinceRecycle,
+        intervalEnabled: state.paintIntervalEnabled,
+        queueRemaining: state.paintQueue.length - state.paintIndex,
+      })) {
+        const recycled = await recycleAllianceEditor(runId);
+        if (runId !== state.paintRunId) return;
+        if (!recycled) {
+          state.paintPaused = true;
+          syncPaintControls();
+          setStatus(
+            "Wplace did not refresh and reopen the editor. Paused; use Resume to retry.",
+            "warn",
+          );
+          continue;
+        }
+        dispatchedSinceRecycle = 0;
+        paintEditorRoot = state.root;
+      }
     }
 
     if (runId === state.paintRunId) {

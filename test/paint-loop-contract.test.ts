@@ -21,10 +21,11 @@ test("auto-paint starts without a confirmation dialog", () => {
   assert.doesNotMatch(autoPaintLoop, /window\.confirm/);
 });
 
-test("unpaced auto-paint runs until Wplace refreshes, then reopens the draft", () => {
-  assert.doesNotMatch(source, /ALLIANCE_EDITOR_RECYCLE_EVENTS/);
-  assert.doesNotMatch(source, /ALLIANCE_NATURAL_REFRESH_WAIT_MS/);
-  assert.doesNotMatch(source, /shouldRecycleAllianceEditor/);
+test("unpaced auto-paint recycles after 7,000 events and reopens the draft", () => {
+  assert.match(source, /ALLIANCE_NATURAL_REFRESH_WAIT_MS = 7000/);
+  assert.match(autoPaintLoop, /shouldRecycleAllianceEditor\(\{/);
+  assert.match(autoPaintLoop, /dispatchedSinceRecycle \+= result\.dispatched/);
+  assert.match(autoPaintLoop, /recycleAllianceEditor\(runId\)/);
   assert.match(autoPaintLoop, /let paintEditorRoot = state\.root/);
   assert.match(autoPaintLoop, /state\.root !== paintEditorRoot/);
   assert.match(autoPaintLoop, /reopenAllianceEditorAfterRefresh\(runId, state\.root\)/);
@@ -35,7 +36,6 @@ test("unpaced auto-paint runs until Wplace refreshes, then reopens the draft", (
   assert.match(autoPaintLoop, /if \(result\.refreshed\) continue;/);
   assert.match(source, /panel\.dataset\.version = SCRIPT_VERSION/);
 
-  assert.doesNotMatch(autoPaintLoop, /dispatchedSinceRecycle/);
   const dispatchStart = source.indexOf("  async function dispatchPaintBatch(");
   const dispatchEnd = source.indexOf("\n  function syncPaintControls()", dispatchStart);
   const dispatchLoop = source.slice(dispatchStart, dispatchEnd);
