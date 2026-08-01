@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.6
+// @version      0.5.7
 // @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-fill for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
@@ -710,8 +710,10 @@
     const buttons = [...(container || document).querySelectorAll("button[aria-label]")].filter((button) => (
       button.offsetParent !== null && button.style.backgroundColor
     ));
-    const colorIndex = PALETTE.findIndex((candidate) => colorKey(candidate) === colorKey(color));
-    return buttons[colorIndex] || null;
+    return buttons.find((button) => {
+      const channels = button.style.backgroundColor.match(/\d+(?:\.\d+)?/g)?.slice(0, 3).map(Number);
+      return channels?.length === 3 && channels.every((channel, index) => channel === color.rgb[index]);
+    }) || null;
   }
 
   function selectPaletteColor(color, announce = false) {
@@ -730,7 +732,7 @@
     }
     const button = visiblePaletteButton(color);
     if (!button) {
-      setStatus(`Could not find Wplace's indexed ${colorLabel(color)} palette swatch.`, "warn");
+      setStatus(`Could not find Wplace's RGB-matched ${colorLabel(color)} palette swatch.`, "warn");
       return false;
     }
     button.click();
