@@ -6,6 +6,7 @@ import {
   colorLabel,
 } from "./core/palette.ts";
 import { type PaintPath, orderPaintItems } from "./core/paint-path.ts";
+import { shouldRefreshMismatchOverlay } from "./core/paint-feedback.ts";
 import { resolveEditorColor, validateTemplatePixels } from "./core/template.ts";
 import {
   alliancePalette,
@@ -60,9 +61,7 @@ import {
     paintQueue: [],
     paintIndex: 0,
     paintColor: null,
-    paintLockedColor: null,
     paintFailureMessage: null,
-    paintNeedsRevalidation: false,
     paletteColors: [],
     pickerRoot: null,
     pickerPointerHandler: null,
@@ -571,7 +570,7 @@ import {
     if (state.hidden) return;
 
     const output = new ImageData(new Uint8ClampedArray(state.target.data), state.width, state.height);
-    if (state.mismatchesOnly) {
+    if (state.mismatchesOnly && !state.paintActive) {
       try {
         const actual = state.baseCanvas.getContext("2d", { willReadFrequently: true })
           .getImageData(0, 0, state.width, state.height).data;
@@ -854,45 +853,6 @@ import {
     }
   }
 
-  async function waitForCanvasPixel(item, timeout = 5000) {
-    const deadline = Date.now() + timeout;
-    do {
-      const disposition = canvasPixelDisposition(item);
-      if (disposition === "matches" || disposition === "protected") return true;
-      await wait(35);
-    } while (Date.now() < deadline);
-    return false;
-  }
-
-  function canvasBatchDispositions(items) {
-    try {
-      const pixels = state.baseCanvas.getContext("2d", { willReadFrequently: true })
-        .getImageData(0, 0, state.width, state.height).data;
-      return items.map((item) => {
-        const index = (item.y * state.width + item.x) * 4;
-        if (pixelMatchesColor(pixels, index, item.color)) return "matches";
-        if (state.onlyUnpainted && pixels[index + 3] !== 0) return "protected";
-        return "paint";
-      });
-    } catch (error) {
-      console.warn(`${SCRIPT_ID}: could not read an editor pixel batch`, error);
-      return null;
-    }
-  }
-
-  async function waitForCanvasBatch(items, timeout = 5000) {
-    const deadline = Date.now() + timeout;
-    do {
-      if (state.paintNeedsRevalidation || !state.baseCanvas?.isConnected) return { refreshed: true };
-      const dispositions = canvasBatchDispositions(items);
-      if (dispositions?.every((value) => value === "matches" || value === "protected")) {
-        return { ok: true, dispositions };
-      }
-      await wait(35);
-    } while (Date.now() < deadline);
-    return { ok: false, dispositions: canvasBatchDispositions(items) };
-  }
-
   function dispatchPaintEvents(item) {
     const rect = state.baseCanvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
@@ -918,72 +878,24 @@ import {
     });
   }
 
-  async function dispatchPaintPixel(item, runId) {
-    while (state.viewportRestoring) await nextFrame();
-    if (!await waitForAllianceArtboard(runId)) return false;
-    if (!preparePaintColor(item.color)) return false;
-    await wait(0);
-    const beforeDispatch = canvasPixelDisposition(item);
-    if (beforeDispatch === "matches" || beforeDispatch === "protected") return true;
-    const dispatchedCanvas = state.baseCanvas;
-    if (!dispatchPaintEvents(item)) return false;
-    if (await waitForCanvasPixel(item)) return true;
-
-    if (state.baseCanvas !== dispatchedCanvas && state.baseCanvas?.isConnected) {
-      const refreshedDisposition = canvasPixelDisposition(item);
-      if (refreshedDisposition === "matches" || refreshedDisposition === "protected") return true;
-      state.paintColor = null;
-      if (!preparePaintColor(item.color)) return false;
-      await wait(0);
-      if (dispatchPaintEvents(item) && await waitForCanvasPixel(item)) return true;
-    }
-
-    const rect = state.baseCanvas.getBoundingClientRect();
-    const clientX = rect.left + ((item.x + 0.5) / state.width) * rect.width;
-    const clientY = rect.top + ((item.y + 0.5) / state.height) * rect.height;
-    state.baseCanvas.dispatchEvent(new MouseEvent("click", {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      clientX,
-      clientY,
-      button: 0,
-    }));
-    return waitForCanvasPixel(item);
-  }
-
   async function dispatchPaintBatch(items, runId) {
     while (state.viewportRestoring) await nextFrame();
-    if (!await waitForAllianceArtboard(runId)) return { ok: false };
-    if (state.paintNeedsRevalidation) return { refreshed: true };
+    if (!await waitForAllianceArtboard(runId)) return { ok: false, dispatched: 0 };
     if (!preparePaintColor(items[0].color)) {
-      return { ok: false, message: state.paintFailureMessage };
+      return { ok: false, dispatched: 0, message: state.paintFailureMessage };
     }
     await wait(0);
 
-    const before = canvasBatchDispositions(items);
-    if (!before) return { ok: false };
-    const paintItems = items.filter((item, index) => before[index] === "paint");
-    const skipped = items.length - paintItems.length;
     const dispatchedCanvas = state.baseCanvas;
-    for (const item of paintItems) {
-      if (state.paintNeedsRevalidation || state.baseCanvas !== dispatchedCanvas || !dispatchedCanvas.isConnected) {
-        return { refreshed: true };
+    let dispatched = 0;
+    for (const item of items) {
+      if (state.baseCanvas !== dispatchedCanvas || !dispatchedCanvas.isConnected) {
+        return { ok: true, dispatched, refreshed: true };
       }
-      if (!dispatchPaintEvents(item)) return { ok: false, failedItem: item };
+      if (!dispatchPaintEvents(item)) return { ok: false, dispatched, failedItem: item };
+      dispatched += 1;
     }
-
-    if (!paintItems.length) return { ok: true, painted: 0, skipped };
-    const confirmed = await waitForCanvasBatch(paintItems);
-    if (confirmed.refreshed) return confirmed;
-    if (!confirmed.ok) {
-      const failedIndex = confirmed.dispositions?.findIndex((value) => value === "paint") ?? -1;
-      return {
-        ok: false,
-        failedItem: paintItems[Math.max(0, failedIndex)],
-      };
-    }
-    return { ok: true, painted: paintItems.length, skipped };
+    return { ok: true, dispatched };
   }
 
   function syncPaintControls() {
@@ -1029,9 +941,7 @@ import {
     state.paintQueue = [];
     state.paintIndex = 0;
     state.paintColor = null;
-    state.paintLockedColor = null;
     state.paintFailureMessage = null;
-    state.paintNeedsRevalidation = false;
     syncPaintControls();
     if (message) setStatus(message);
   }
@@ -1048,7 +958,6 @@ import {
     state.paintActive = true;
     state.paintPaused = false;
     state.paintColor = null;
-    state.paintNeedsRevalidation = false;
     syncPaintControls();
     setStatus(`Filling ${queue.length.toLocaleString()} local draft pixels…`);
 
@@ -1157,12 +1066,9 @@ import {
     state.paintActive = true;
     state.paintPaused = false;
     state.paintColor = null;
-    state.paintLockedColor = lockedColor;
     state.paintFailureMessage = null;
-    state.paintNeedsRevalidation = false;
     syncPaintControls();
-    let paintedCount = 0;
-    let skippedCount = 0;
+    let dispatchedCount = 0;
 
     while (state.paintIndex < state.paintQueue.length && runId === state.paintRunId) {
       while (state.paintPaused && runId === state.paintRunId) await wait(100);
@@ -1172,84 +1078,41 @@ import {
         stopAutoFill("Wplace did not restore the alliance artboard; auto-paint stopped.");
         return;
       }
-      if (state.paintNeedsRevalidation) {
-        state.paintNeedsRevalidation = false;
-        state.paintQueue = buildPaintQueue(state.paintLockedColor);
-        state.paintIndex = 0;
-        state.paintColor = null;
-        syncPaintControls();
-        if (!state.paintQueue.length) break;
-        setStatus(`Artboard restored; rechecked ${state.paintQueue.length.toLocaleString()} remaining pixels.`);
-      }
-
       const item = state.paintQueue[state.paintIndex];
-      if (!state.paintIntervalEnabled) {
-        const batch = [];
-        const batchColor = colorKey(item.color);
-        for (
-          let index = state.paintIndex;
-          index < state.paintQueue.length && batch.length < UNPACED_BATCH_SIZE;
-          index += 1
-        ) {
-          const candidate = state.paintQueue[index];
-          if (colorKey(candidate.color) !== batchColor) break;
-          batch.push(candidate);
-        }
-        const result = await dispatchPaintBatch(batch, runId);
-        if (result.refreshed) continue;
-        if (!result.ok) {
-          state.paintPaused = true;
-          syncPaintControls();
-          const failed = result.failedItem || item;
-          setStatus(
-            result.message
-              || `Could not confirm the batch near pixel ${failed.x}, ${failed.y}. Paused; use Resume to retry.`,
-            "warn",
-          );
-          continue;
-        }
-        paintedCount += result.painted;
-        skippedCount += result.skipped;
-        state.paintIndex += batch.length;
-        syncPaintControls();
-        setStatus(
-          `Auto-paint ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()} · `
-          + `${paintedCount.toLocaleString()} painted · ${skippedCount.toLocaleString()} skipped.`,
-        );
-        renderOverlay();
-        continue;
+      const batch = [];
+      const batchColor = colorKey(item.color);
+      const batchLimit = state.paintIntervalEnabled ? 1 : UNPACED_BATCH_SIZE;
+      for (
+        let index = state.paintIndex;
+        index < state.paintQueue.length && batch.length < batchLimit;
+        index += 1
+      ) {
+        const candidate = state.paintQueue[index];
+        if (colorKey(candidate.color) !== batchColor) break;
+        batch.push(candidate);
       }
-      const disposition = canvasPixelDisposition(item);
-      let painted = disposition === "matches" || disposition === "protected";
-      if (painted) skippedCount += 1;
-      else {
-        painted = await dispatchPaintPixel(item, runId);
-        if (painted) {
-          const finalDisposition = canvasPixelDisposition(item);
-          if (finalDisposition === "protected") skippedCount += 1;
-          else paintedCount += 1;
-        }
+      const result = await dispatchPaintBatch(batch, runId);
+      if (result.dispatched) {
+        dispatchedCount += result.dispatched;
+        state.paintIndex += result.dispatched;
       }
-      if (!painted) {
+      if (result.refreshed) continue;
+      if (!result.ok) {
         state.paintPaused = true;
         syncPaintControls();
+        const failed = result.failedItem || state.paintQueue[state.paintIndex] || item;
         setStatus(
-          state.paintFailureMessage
-            || `Could not confirm pixel ${item.x}, ${item.y}. Paused; use Resume to retry.`,
+          result.message
+            || `Could not dispatch the paint event near pixel ${failed.x}, ${failed.y}. Paused; use Resume to retry.`,
           "warn",
         );
         continue;
       }
-
-      state.paintIndex += 1;
-      if (state.paintIndex % 10 === 0 || state.paintIndex === state.paintQueue.length) {
-        syncPaintControls();
-        setStatus(
-          `Auto-paint ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()} · `
-          + `${paintedCount.toLocaleString()} painted · ${skippedCount.toLocaleString()} skipped.`,
-        );
-      }
-      if (state.paintIndex % 25 === 0) renderOverlay();
+      syncPaintControls();
+      setStatus(
+        `Auto-paint ${state.paintIndex.toLocaleString()} / ${state.paintQueue.length.toLocaleString()} · `
+        + `${dispatchedCount.toLocaleString()} events dispatched.`,
+      );
       if (state.paintIntervalEnabled) await wait(state.paintDelay);
     }
 
@@ -1257,13 +1120,11 @@ import {
       state.paintActive = false;
       state.paintPaused = false;
       state.paintColor = null;
-      state.paintLockedColor = null;
       state.paintFailureMessage = null;
       syncPaintControls();
-      renderOverlay();
       setStatus(
-        `Auto-paint complete: ${paintedCount.toLocaleString()} painted, `
-        + `${skippedCount.toLocaleString()} already filled or protected.`,
+        `Auto-paint complete: ${dispatchedCount.toLocaleString()} events dispatched. `
+        + "Use Refresh or start Auto-paint again to rescan the canvas.",
       );
     }
   }
@@ -1548,7 +1409,7 @@ import {
         <section class="waa-group waa-paint">
           <div class="waa-group-label" id="${PANEL_ID}-paint-label">Paint queue</div>
           <div class="waa-row">
-            <label class="waa-check waa-alliance-only" title="Add a delay after every confirmed paint event">
+            <label class="waa-check waa-alliance-only" title="Add a delay after every dispatched paint event">
               <input id="${PANEL_ID}-paint-interval" type="checkbox" checked> Interval
             </label>
             <input class="waa-alliance-only" id="${PANEL_ID}-paint-delay" aria-label="Auto-paint interval in milliseconds" type="number" min="1" max="5000" step="1" value="150">
@@ -1706,7 +1567,6 @@ import {
     if (!changedEditor && document.getElementById(PANEL_ID) && state.overlayCanvas?.isConnected) return;
 
     if (state.paintActive && !sameAsset) stopAutoFill("The asset editor changed; auto-paint stopped.");
-    if (state.paintActive && sameAsset && changedEditor) state.paintNeedsRevalidation = true;
     if (sameAsset) state.paintColor = null;
 
     state.editorKind = editor.kind;
@@ -1730,8 +1590,13 @@ import {
     if (!sameAsset || !state.target) await restoreTarget();
     renderOverlay();
 
-    editor.root.addEventListener("pointerup", () => {
-      if (state.mismatchesOnly) requestAnimationFrame(renderOverlay);
+    editor.root.addEventListener("pointerup", (event) => {
+      if (shouldRefreshMismatchOverlay({
+        mismatchesOnly: state.mismatchesOnly,
+        paintActive: state.paintActive,
+        pointerId: event.pointerId,
+        syntheticPointerId: SYNTHETIC_POINTER_ID,
+      })) requestAnimationFrame(renderOverlay);
     });
   }
 
