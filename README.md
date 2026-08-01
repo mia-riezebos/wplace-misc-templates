@@ -18,6 +18,7 @@ A focused userscript for Wplace's asset editors:
 - Optional **Only unpainted pixels** constraint that never overwrites non-transparent canvas pixels
 - Optional **Keep view on refresh** restoration for alliance-editor zoom and canvas position
 - Alliance paint confirmation survives same-editor artboard replacements and waits up to five seconds before pausing
+- Synthetic alliance strokes tolerate Wplace's native pointer-capture requirement without changing real mouse or touch input
 - Remembers one template per editor size in local browser storage
 
 Auto-fill is hard-limited to the DOM element named **Alliance asset canvas** at the two alliance dimensions above, or to the visible 16×16 canvas on `/profile-picture`. It cannot activate on Wplace's global canvas. It uses Wplace's visible palette and editor input events; it does not call private APIs, directly access the backend, or click Save.

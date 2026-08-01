@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.0
+// @version      0.5.1
 // @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-fill for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
@@ -27,6 +27,7 @@
   const SETTINGS_KEY = `${SCRIPT_ID}:settings:v1`;
   const ALLIANCE_SIZES = new Set(["64x64", "384x128"]);
   const PROFILE_SIZE = "16x16";
+  const SYNTHETIC_POINTER_ID = 9471;
 
   const PALETTE = [
     ["Black", 0, 0, 0],
@@ -760,16 +761,43 @@
       composed: true,
       clientX,
       clientY,
-      pointerId: 9471,
+      pointerId: SYNTHETIC_POINTER_ID,
       pointerType: "mouse",
       isPrimary: true,
       button: 0,
     };
 
-    state.baseCanvas.dispatchEvent(new PointerEvent("pointermove", { ...common, buttons: 0 }));
-    state.baseCanvas.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
-    state.baseCanvas.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
-    return true;
+    const root = state.root;
+    const originalDescriptor = root
+      ? Object.getOwnPropertyDescriptor(root, "setPointerCapture")
+      : null;
+    const originalSetPointerCapture = root?.setPointerCapture;
+
+    try {
+      if (root && typeof originalSetPointerCapture === "function") {
+        Object.defineProperty(root, "setPointerCapture", {
+          configurable: true,
+          value(pointerId) {
+            try {
+              return originalSetPointerCapture.call(this, pointerId);
+            } catch (error) {
+              if (pointerId === SYNTHETIC_POINTER_ID && error?.name === "NotFoundError") return;
+              throw error;
+            }
+          },
+        });
+      }
+
+      state.baseCanvas.dispatchEvent(new PointerEvent("pointermove", { ...common, buttons: 0 }));
+      state.baseCanvas.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
+      state.baseCanvas.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
+      return true;
+    } finally {
+      if (root && typeof originalSetPointerCapture === "function") {
+        if (originalDescriptor) Object.defineProperty(root, "setPointerCapture", originalDescriptor);
+        else delete root.setPointerCapture;
+      }
+    }
   }
 
   async function dispatchPaintPixel(item) {
