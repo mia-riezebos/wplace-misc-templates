@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
-// @version      0.5.1
+// @version      0.5.2
 // @description  Byte-exact overlays, stable alliance viewports, and editor-only auto-fill for Wplace alliance assets and user profile pictures.
 // @author       You
 // @match        https://wplace.live/*
@@ -125,6 +125,7 @@
     viewportObserver: null,
     viewportRoot: null,
     viewportCaptureHandler: null,
+    viewportRestoring: false,
   };
 
   const PALETTE_BY_RGB = new Map(
@@ -252,28 +253,97 @@
     if (state.editorKind !== "alliance" || !state.frame?.isConnected) return;
     const rect = state.frame.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
+    const width = Number.parseFloat(state.frame.style.width) || rect.width;
+    const height = Number.parseFloat(state.frame.style.height) || rect.height;
+    const transform = new DOMMatrixReadOnly(
+      state.frame.style.transform || getComputedStyle(state.frame).transform,
+    );
     state.viewport = {
       key: viewportKey(),
-      width: state.frame.style.width || `${rect.width}px`,
-      height: state.frame.style.height || `${rect.height}px`,
-      transform: state.frame.style.transform || getComputedStyle(state.frame).transform,
+      scale: width / state.width,
+      aspectRatio: width / height,
+      translateX: transform.m41,
+      translateY: transform.m42,
     };
   }
 
-  function applyPreservedViewport(frame) {
+  function readAllianceViewport(frame) {
+    const rect = frame.getBoundingClientRect();
+    const width = Number.parseFloat(frame.style.width) || rect.width;
+    const transform = new DOMMatrixReadOnly(frame.style.transform || getComputedStyle(frame).transform);
+    return {
+      scale: width / state.width,
+      translateX: transform.m41,
+      translateY: transform.m42,
+    };
+  }
+
+  function nextFrame() {
+    return new Promise((resolve) => requestAnimationFrame(resolve));
+  }
+
+  async function restorePreservedViewport(root, frame) {
     const viewport = state.viewport;
     if (!state.preserveView || !viewport || viewport.key !== viewportKey()) return;
-    const apply = () => {
-      if (!frame.isConnected) return;
-      frame.style.width = viewport.width;
-      frame.style.height = viewport.height;
-      frame.style.transform = viewport.transform;
-    };
-    apply();
-    requestAnimationFrame(() => {
-      apply();
-      requestAnimationFrame(apply);
-    });
+    await nextFrame();
+    if (!root.isConnected || !frame.isConnected) return;
+
+    let current = readAllianceViewport(frame);
+    const rootRect = root.getBoundingClientRect();
+    const centerX = rootRect.left + rootRect.width / 2;
+    const centerY = rootRect.top + rootRect.height / 2;
+    const rawZoomSteps = Math.log(viewport.scale / current.scale) / Math.log(1.2);
+    const zoomSteps = Number.isFinite(rawZoomSteps)
+      ? Math.max(-24, Math.min(24, Math.round(rawZoomSteps)))
+      : 0;
+    const deltaY = zoomSteps > 0 ? -1 : 1;
+
+    for (let step = 0; step < Math.abs(zoomSteps); step += 1) {
+      root.dispatchEvent(new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: centerX,
+        clientY: centerY,
+        deltaY,
+      }));
+      await nextFrame();
+    }
+
+    current = readAllianceViewport(frame);
+    const deltaX = viewport.translateX - current.translateX;
+    const deltaTranslateY = viewport.translateY - current.translateY;
+    if (Math.abs(deltaX) >= 0.01 || Math.abs(deltaTranslateY) >= 0.01) {
+      const common = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        pointerId: SYNTHETIC_POINTER_ID,
+        pointerType: "mouse",
+        isPrimary: true,
+        button: 1,
+      };
+      withSyntheticPointerCapture(root, () => {
+        state.baseCanvas.dispatchEvent(new PointerEvent("pointerdown", {
+          ...common, buttons: 4, clientX: centerX, clientY: centerY,
+        }));
+        state.baseCanvas.dispatchEvent(new PointerEvent("pointermove", {
+          ...common,
+          buttons: 4,
+          clientX: centerX + deltaX,
+          clientY: centerY + deltaTranslateY,
+        }));
+        state.baseCanvas.dispatchEvent(new PointerEvent("pointerup", {
+          ...common,
+          buttons: 0,
+          clientX: centerX + deltaX,
+          clientY: centerY + deltaTranslateY,
+        }));
+      });
+      await nextFrame();
+    }
+
+    captureAllianceViewport();
   }
 
   function installViewportCapture(root, frame) {
@@ -741,6 +811,35 @@
     return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
   }
 
+  function withSyntheticPointerCapture(root, callback) {
+    const originalDescriptor = root
+      ? Object.getOwnPropertyDescriptor(root, "setPointerCapture")
+      : null;
+    const originalSetPointerCapture = root?.setPointerCapture;
+
+    try {
+      if (root && typeof originalSetPointerCapture === "function") {
+        Object.defineProperty(root, "setPointerCapture", {
+          configurable: true,
+          value(pointerId) {
+            try {
+              return originalSetPointerCapture.call(this, pointerId);
+            } catch (error) {
+              if (pointerId === SYNTHETIC_POINTER_ID && error?.name === "NotFoundError") return;
+              throw error;
+            }
+          },
+        });
+      }
+      return callback();
+    } finally {
+      if (root && typeof originalSetPointerCapture === "function") {
+        if (originalDescriptor) Object.defineProperty(root, "setPointerCapture", originalDescriptor);
+        else delete root.setPointerCapture;
+      }
+    }
+  }
+
   async function waitForCanvasPixel(item, timeout = 5000) {
     const deadline = Date.now() + timeout;
     do {
@@ -767,40 +866,16 @@
       button: 0,
     };
 
-    const root = state.root;
-    const originalDescriptor = root
-      ? Object.getOwnPropertyDescriptor(root, "setPointerCapture")
-      : null;
-    const originalSetPointerCapture = root?.setPointerCapture;
-
-    try {
-      if (root && typeof originalSetPointerCapture === "function") {
-        Object.defineProperty(root, "setPointerCapture", {
-          configurable: true,
-          value(pointerId) {
-            try {
-              return originalSetPointerCapture.call(this, pointerId);
-            } catch (error) {
-              if (pointerId === SYNTHETIC_POINTER_ID && error?.name === "NotFoundError") return;
-              throw error;
-            }
-          },
-        });
-      }
-
+    return withSyntheticPointerCapture(state.root, () => {
       state.baseCanvas.dispatchEvent(new PointerEvent("pointermove", { ...common, buttons: 0 }));
       state.baseCanvas.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
       state.baseCanvas.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
       return true;
-    } finally {
-      if (root && typeof originalSetPointerCapture === "function") {
-        if (originalDescriptor) Object.defineProperty(root, "setPointerCapture", originalDescriptor);
-        else delete root.setPointerCapture;
-      }
-    }
+    });
   }
 
   async function dispatchPaintPixel(item) {
+    while (state.viewportRestoring) await nextFrame();
     if (state.paintColor !== colorKey(item.color) && !selectPaletteColor(item.color)) return false;
     await wait(0);
     const dispatchedCanvas = state.baseCanvas;
@@ -1383,7 +1458,12 @@
     state.baseCanvas = editor.baseCanvas;
     state.width = editor.width;
     state.height = editor.height;
-    applyPreservedViewport(editor.frame);
+    state.viewportRestoring = true;
+    try {
+      await restorePreservedViewport(editor.root, editor.frame);
+    } finally {
+      state.viewportRestoring = false;
+    }
     state.overlayCanvas = makeOverlayCanvas(editor.frame, editor.width, editor.height);
     injectStyles();
     buildPanel(editor.root);
