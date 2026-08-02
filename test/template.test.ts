@@ -6,6 +6,7 @@ import {
 } from "../src/core/palette.ts";
 import {
   resolveEditorColor,
+  resolveTemplatePosition,
   validateTemplatePixels,
 } from "../src/core/template.ts";
 
@@ -42,9 +43,35 @@ test("alliance templates still reject colors outside the template palette", () =
   );
 });
 
+test("HQ templates use the same exact Wplace palette policy", () => {
+  assert.equal(
+    validateTemplatePixels(onePixel(16, 174, 130), "hq", CURRENT_WPLACE_PALETTE),
+    null,
+  );
+  assert.match(
+    validateTemplatePixels(onePixel(1, 2, 3), "hq", CURRENT_WPLACE_PALETTE) || "",
+    /not a supported Wplace template color/,
+  );
+});
+
 test("profile templates retain arbitrary opaque RGB support", () => {
   assert.equal(
     validateTemplatePixels(onePixel(1, 2, 3), "profile", CURRENT_WPLACE_PALETTE),
     null,
+  );
+});
+
+test("template positions default to center and clamp to the canvas", () => {
+  assert.deepEqual(
+    resolveTemplatePosition(2000, 2000, 384, 128),
+    { x: 808, y: 936, maxX: 1616, maxY: 1872 },
+  );
+  assert.deepEqual(
+    resolveTemplatePosition(2000, 2000, 384, 128, -20, 9000),
+    { x: 0, y: 1872, maxX: 1616, maxY: 1872 },
+  );
+  assert.deepEqual(
+    resolveTemplatePosition(250, 250, 250, 250, 12.8, 14.2),
+    { x: 0, y: 0, maxX: 0, maxY: 0 },
   );
 });

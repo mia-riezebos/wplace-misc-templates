@@ -5,7 +5,7 @@ const metadata = `// ==UserScript==
 // @name         Wplace Asset Reference Overlay
 // @namespace    https://wplace.live/
 // @version      ${packageJson.version}
-// @description  Byte-exact overlays, spatial paint paths, and editor-only auto-paint for Wplace alliance assets and user profile pictures.
+// @description  Byte-exact overlays and editor-assisted painting for Wplace alliance assets, headquarters, and profile pictures.
 // @author       You
 // @match        https://wplace.live/*
 // @run-at       document-idle

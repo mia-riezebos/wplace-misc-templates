@@ -5,12 +5,41 @@ import {
   liveColorForTemplateRgb,
 } from "./palette.ts";
 
-export type EditorKind = "alliance" | "profile";
+export type EditorKind = "alliance" | "hq" | "profile";
 
 export interface PixelImage {
   readonly width: number;
   readonly height: number;
   readonly data: ArrayLike<number>;
+}
+
+export interface TemplatePosition {
+  readonly x: number;
+  readonly y: number;
+  readonly maxX: number;
+  readonly maxY: number;
+}
+
+export function resolveTemplatePosition(
+  canvasWidth: number,
+  canvasHeight: number,
+  templateWidth: number,
+  templateHeight: number,
+  requestedX?: number,
+  requestedY?: number,
+): TemplatePosition {
+  const maxX = Math.max(0, canvasWidth - templateWidth);
+  const maxY = Math.max(0, canvasHeight - templateHeight);
+  const centerX = Math.floor(maxX / 2);
+  const centerY = Math.floor(maxY / 2);
+  const x = Number.isFinite(requestedX) ? Math.trunc(requestedX!) : centerX;
+  const y = Number.isFinite(requestedY) ? Math.trunc(requestedY!) : centerY;
+  return {
+    x: Math.max(0, Math.min(maxX, x)),
+    y: Math.max(0, Math.min(maxY, y)),
+    maxX,
+    maxY,
+  };
 }
 
 export function resolveEditorColor(
@@ -42,7 +71,7 @@ export function validateTemplatePixels(
       const red = image.data[index] ?? 0;
       const green = image.data[index + 1] ?? 0;
       const blue = image.data[index + 2] ?? 0;
-      if (kind === "alliance" && !resolveEditorColor(kind, colors, red, green, blue)) {
+      if (kind !== "profile" && !resolveEditorColor(kind, colors, red, green, blue)) {
         return `Pixel ${x}, ${y} uses rgb(${red}, ${green}, ${blue}), which is not a supported Wplace template color.`;
       }
     }

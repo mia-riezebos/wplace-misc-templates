@@ -11,7 +11,11 @@ import {
   shouldRecycleAllianceEditor,
 } from "./core/paint-session.ts";
 import { shouldRefreshMismatchOverlay } from "./core/paint-feedback.ts";
-import { resolveEditorColor, validateTemplatePixels } from "./core/template.ts";
+import {
+  resolveEditorColor,
+  resolveTemplatePosition,
+  validateTemplatePixels,
+} from "./core/template.ts";
 import {
   alliancePalette,
   paletteButtonForColor,
@@ -21,7 +25,8 @@ import {
   /*
    * Safety boundary:
    * - no fetch/XHR/WebSocket calls or direct backend access
-   * - auto-paint is only exposed for the 64x64 / 384x128 Alliance asset canvas
+   * - HQ auto-paint is build-time opt-in; edit ENABLE_HQ_AUTO_PAINT before installation
+   * - alliance auto-paint is exposed for the 64x64 / 384x128 asset canvas
    * - instant fill is only exposed for the local 16x16 user profile-picture draft
    * - both modes use visible editor controls; this script never clicks Save/Submit
    */
@@ -30,9 +35,15 @@ import {
   const SCRIPT_ID = "waa-reference-overlay";
   const PANEL_ID = `${SCRIPT_ID}-panel`;
   const OVERLAY_CLASS = `${SCRIPT_ID}-canvas`;
+  const MOVE_TOOLBAR_CLASS = `${SCRIPT_ID}-move-toolbar`;
   const STORAGE_PREFIX = `${SCRIPT_ID}:v1:`;
   const SETTINGS_KEY = `${SCRIPT_ID}:settings:v1`;
+  const TEMPLATE_DB_NAME = `${SCRIPT_ID}:templates:v1`;
+  // Change this to true in the built userscript before installation to expose
+  // experimental HQ auto-paint controls. HQ overlays remain enabled either way.
+  const ENABLE_HQ_AUTO_PAINT = false;
   const ALLIANCE_SIZES = new Set(["64x64", "384x128"]);
+  const HQ_SIZES = new Set([250, 500, 750, 1000, 1500, 2000]);
   const PROFILE_SIZE = "16x16";
   const SYNTHETIC_POINTER_ID = 9471;
   const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
@@ -45,9 +56,29 @@ import {
     root: null,
     frame: null,
     baseCanvas: null,
+    tileLayer: null,
     overlayCanvas: null,
     target: null,
+    templateSource: null,
     sourceName: "reference",
+    templateWidth: 0,
+    templateHeight: 0,
+    templateOffsetX: 0,
+    templateOffsetY: 0,
+    templateMoveActive: false,
+    templateMoveDragging: false,
+    templateMoveOriginX: 0,
+    templateMoveOriginY: 0,
+    templateMoveDraftX: 0,
+    templateMoveDraftY: 0,
+    templateMoveStartClientX: 0,
+    templateMoveStartClientY: 0,
+    templateMoveStartX: 0,
+    templateMoveStartY: 0,
+    templateMovePending: null,
+    templateMoveFrame: 0,
+    templateMoveToolbar: null,
+    templateMoveHandlersInstalled: false,
     width: 0,
     height: 0,
     opacity: 0.55,
@@ -68,6 +99,7 @@ import {
     paintIndex: 0,
     paintColor: null,
     paintFailureMessage: null,
+    hqChargesRemaining: null,
     paletteColors: [],
     pickerRoot: null,
     pickerPointerHandler: null,
@@ -79,6 +111,7 @@ import {
     viewportRestoring: false,
     statusMessage: "Load an image to begin.",
     statusKind: "normal",
+    assetId: null,
   };
 
   function activeAlliancePalette() {
@@ -108,6 +141,9 @@ import {
   }
 
   function storageKey() {
+    if (state.editorKind === "hq") {
+      return `${STORAGE_PREFIX}hq:${state.assetId || "current"}:${editorKey()}`;
+    }
     return `${STORAGE_PREFIX}${editorKey()}`;
   }
 
@@ -184,8 +220,31 @@ import {
     return { kind: "profile", root, frame, baseCanvas, width: 16, height: 16 };
   }
 
+  function readHqEditor() {
+    const root = document.querySelector('[role="application"][aria-label="Headquarters canvas"]');
+    if (!root) return null;
+    const sizeMatch = root.textContent.match(/\b(250|500|750|1000|1500|2000)\s*x\s*\1\b/);
+    const size = Number(sizeMatch?.[1]);
+    if (!HQ_SIZES.has(size)) return null;
+    const frame = [...root.children].find((child) => child.classList.contains("artboard-frame"));
+    const tileLayer = frame?.querySelector(".hq-tile-layer");
+    if (!frame || !tileLayer) return null;
+    const eventMatch = root.closest('[role="dialog"], dialog')?.textContent.match(/Event\s+#([\d,]+)/i);
+    const assetId = eventMatch ? `event-${eventMatch[1].replaceAll(",", "")}` : "current";
+    return {
+      kind: "hq",
+      root,
+      frame,
+      baseCanvas: null,
+      tileLayer,
+      width: size,
+      height: size,
+      assetId,
+    };
+  }
+
   function readEditor() {
-    return readAllianceEditor() || readProfileEditor();
+    return readAllianceEditor() || readProfileEditor() || readHqEditor();
   }
 
   function viewportKey() {
@@ -193,7 +252,7 @@ import {
   }
 
   function captureAllianceViewport() {
-    if (state.editorKind !== "alliance" || !state.frame?.isConnected) return;
+    if (state.editorKind === "profile" || !state.frame?.isConnected) return;
     const rect = state.frame.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
     const width = Number.parseFloat(state.frame.style.width) || rect.width;
@@ -266,17 +325,19 @@ import {
         isPrimary: true,
         button: 1,
       };
+      const target = paintEventTarget();
+      if (!target) return;
       withSyntheticPointerCapture(root, () => {
-        state.baseCanvas.dispatchEvent(new PointerEvent("pointerdown", {
+        target.dispatchEvent(new PointerEvent("pointerdown", {
           ...common, buttons: 4, clientX: centerX, clientY: centerY,
         }));
-        state.baseCanvas.dispatchEvent(new PointerEvent("pointermove", {
+        target.dispatchEvent(new PointerEvent("pointermove", {
           ...common,
           buttons: 4,
           clientX: centerX + deltaX,
           clientY: centerY + deltaTranslateY,
         }));
-        state.baseCanvas.dispatchEvent(new PointerEvent("pointerup", {
+        target.dispatchEvent(new PointerEvent("pointerup", {
           ...common,
           buttons: 0,
           clientX: centerX + deltaX,
@@ -297,9 +358,12 @@ import {
     }
     state.viewportRoot = null;
     state.viewportCaptureHandler = null;
-    if (state.editorKind !== "alliance") return;
+    if (state.editorKind === "profile") return;
 
-    const captureSoon = () => requestAnimationFrame(captureAllianceViewport);
+    const captureSoon = () => requestAnimationFrame(() => {
+      captureAllianceViewport();
+      syncTemplateMoveUi();
+    });
     state.viewportRoot = root;
     state.viewportCaptureHandler = captureSoon;
     root.addEventListener("wheel", captureSoon, { passive: true });
@@ -326,9 +390,132 @@ import {
       });
       frame.append(canvas);
     }
+    installTemplateMoveHandlers(canvas);
     canvas.width = width;
     canvas.height = height;
     return canvas;
+  }
+
+  function ensureTemplateMoveToolbar(frame) {
+    const toolbarHost = state.root?.closest('[role="dialog"], dialog') || document.body;
+    let toolbar = document.querySelector(`.${MOVE_TOOLBAR_CLASS}`);
+    if (!toolbar) {
+      toolbar = document.createElement("div");
+      toolbar.className = MOVE_TOOLBAR_CLASS;
+      toolbar.hidden = true;
+      toolbar.setAttribute("role", "toolbar");
+      toolbar.setAttribute("aria-label", "Confirm or cancel template position");
+      toolbar.innerHTML = `
+        <button type="button" data-action="confirm" aria-label="Confirm template position" title="Confirm position">✓</button>
+        <button type="button" data-action="cancel" aria-label="Cancel template position" title="Cancel repositioning">×</button>
+      `;
+      for (const eventName of ["pointerdown", "pointerup", "click"]) {
+        toolbar.addEventListener(eventName, (event) => event.stopPropagation());
+      }
+      toolbar.querySelector('[data-action="confirm"]').addEventListener("click", confirmTemplateMove);
+      toolbar.querySelector('[data-action="cancel"]').addEventListener("click", cancelTemplateMove);
+    }
+    if (toolbar.parentElement !== toolbarHost) toolbarHost.append(toolbar);
+    state.templateMoveToolbar = toolbar;
+    return toolbar;
+  }
+
+  function installTemplateMoveHandlers(canvas) {
+    if (state.templateMoveHandlersInstalled) return;
+    state.templateMoveHandlersInstalled = true;
+    window.addEventListener("pointerdown", (event) => {
+      if (
+        !state.templateMoveActive
+        || !event.composedPath().includes(state.overlayCanvas)
+        || event.button !== 0
+        || !state.templateSource
+      ) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const pixel = editorPixelFromClient(event.clientX, event.clientY);
+      if (!pixel) return;
+      const withinTemplate = pixel.x >= state.templateMoveDraftX
+        && pixel.y >= state.templateMoveDraftY
+        && pixel.x < state.templateMoveDraftX + state.templateSource.width
+        && pixel.y < state.templateMoveDraftY + state.templateSource.height;
+      if (!withinTemplate) return;
+      state.templateMoveDragging = true;
+      state.templateMoveStartClientX = event.clientX;
+      state.templateMoveStartClientY = event.clientY;
+      state.templateMoveStartX = state.templateMoveDraftX;
+      state.templateMoveStartY = state.templateMoveDraftY;
+      state.overlayCanvas.setPointerCapture(event.pointerId);
+      syncTemplateMoveUi();
+    }, true);
+    window.addEventListener("pointermove", (event) => {
+      if (!state.templateMoveActive || !event.composedPath().includes(state.overlayCanvas)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!state.templateMoveDragging) return;
+      const rect = editorSurfaceRect();
+      if (!rect?.width || !rect.height) return;
+      const deltaX = Math.round(
+        ((event.clientX - state.templateMoveStartClientX) / rect.width) * state.width,
+      );
+      const deltaY = Math.round(
+        ((event.clientY - state.templateMoveStartClientY) / rect.height) * state.height,
+      );
+      queueTemplateMovePreview(
+        state.templateMoveStartX + deltaX,
+        state.templateMoveStartY + deltaY,
+      );
+    }, true);
+    const finishDrag = (event) => {
+      if (
+        !state.templateMoveActive
+        || (!state.templateMoveDragging && !event.composedPath().includes(state.overlayCanvas))
+      ) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!state.templateMoveDragging) return;
+      flushTemplateMovePreview();
+      state.templateMoveDragging = false;
+      if (state.overlayCanvas?.hasPointerCapture(event.pointerId)) {
+        state.overlayCanvas.releasePointerCapture(event.pointerId);
+      }
+      syncTemplateMoveUi();
+    };
+    window.addEventListener("pointerup", finishDrag, true);
+    window.addEventListener("pointercancel", finishDrag, true);
+  }
+
+  function paintEventTarget() {
+    return state.editorKind === "hq" ? state.root : state.baseCanvas;
+  }
+
+  function editorSurfaceRect() {
+    return (state.editorKind === "hq" ? state.frame : state.baseCanvas)?.getBoundingClientRect();
+  }
+
+  function readEditorPixels() {
+    if (state.editorKind !== "hq") {
+      return state.baseCanvas.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, state.width, state.height);
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = state.width;
+    canvas.height = state.height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    const frameWidth = Number.parseFloat(state.frame.style.width)
+      || state.frame.getBoundingClientRect().width;
+    const cssScale = frameWidth / state.width;
+    if (!cssScale) throw new Error("The HQ artboard has no readable scale.");
+
+    for (const tile of state.tileLayer.querySelectorAll("canvas")) {
+      const left = Number.parseFloat(tile.style.left);
+      const top = Number.parseFloat(tile.style.top);
+      if (!Number.isFinite(left) || !Number.isFinite(top)) continue;
+      const x = Math.round(left / cssScale);
+      const y = Math.round(top / cssScale);
+      context.drawImage(tile, x, y, tile.width, tile.height);
+    }
+    return context.getImageData(0, 0, state.width, state.height);
   }
 
   function bytesToBase64(bytes) {
@@ -345,6 +532,61 @@ import {
     const bytes = new Uint8ClampedArray(binary.length);
     for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
     return bytes;
+  }
+
+  function openTemplateDatabase() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(TEMPLATE_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("templates")) {
+          request.result.createObjectStore("templates");
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("Could not open template storage."));
+    });
+  }
+
+  async function writeLargeTemplate(key, file) {
+    const database = await openTemplateDatabase();
+    try {
+      await new Promise((resolve, reject) => {
+        const transaction = database.transaction("templates", "readwrite");
+        transaction.objectStore("templates").put(file, key);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error || new Error("Could not save the HQ template."));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  async function readLargeTemplate(key) {
+    const database = await openTemplateDatabase();
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = database.transaction("templates", "readonly");
+        const request = transaction.objectStore("templates").get(key);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error || new Error("Could not read the HQ template."));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  async function deleteLargeTemplate(key) {
+    const database = await openTemplateDatabase();
+    try {
+      await new Promise((resolve, reject) => {
+        const transaction = database.transaction("templates", "readwrite");
+        transaction.objectStore("templates").delete(key);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error || new Error("Could not clear the HQ template."));
+      });
+    } finally {
+      database.close();
+    }
   }
 
   async function urlToImageData(url, width, height) {
@@ -370,7 +612,7 @@ import {
     return aboveDistance <= upperLeftDistance ? above : upperLeft;
   }
 
-  async function decodePngSamples(file, expectedWidth, expectedHeight) {
+  async function decodePngSamples(file, expectedWidth, expectedHeight, allowSmaller = false) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const signature = [137, 80, 78, 71, 13, 10, 26, 10];
     if (bytes.length < 8 || signature.some((value, index) => bytes[index] !== value)) {
@@ -405,8 +647,13 @@ import {
           filter: data[11],
           interlace: data[12],
         };
-        if (header.width !== expectedWidth || header.height !== expectedHeight) {
-          throw new Error(`Expected ${expectedWidth}x${expectedHeight}, got ${header.width}x${header.height}. Resize it outside this script.`);
+        const dimensionsMatch = header.width === expectedWidth && header.height === expectedHeight;
+        const dimensionsFit = header.width <= expectedWidth && header.height <= expectedHeight;
+        if (!dimensionsMatch && (!allowSmaller || !dimensionsFit)) {
+          const expectation = allowSmaller
+            ? `at most ${expectedWidth}x${expectedHeight}`
+            : `${expectedWidth}x${expectedHeight}`;
+          throw new Error(`Expected ${expectation}, got ${header.width}x${header.height}. Resize it outside this script.`);
         }
       } else if (type === "PLTE") {
         palette = data;
@@ -508,21 +755,189 @@ import {
     return new ImageData(rgba, header.width, header.height);
   }
 
+  function placeTemplateOnEditor(imageData, requestedX, requestedY) {
+    const position = resolveTemplatePosition(
+      state.width,
+      state.height,
+      imageData.width,
+      imageData.height,
+      requestedX,
+      requestedY,
+    );
+    const offsetX = position.x;
+    const offsetY = position.y;
+    if (
+      imageData.width === state.width
+      && imageData.height === state.height
+      && offsetX === 0
+      && offsetY === 0
+    ) {
+      return { imageData, offsetX, offsetY };
+    }
+    const placed = new ImageData(state.width, state.height);
+    for (let y = 0; y < imageData.height; y += 1) {
+      const sourceStart = y * imageData.width * 4;
+      const targetStart = ((y + offsetY) * state.width + offsetX) * 4;
+      placed.data.set(
+        imageData.data.subarray(sourceStart, sourceStart + imageData.width * 4),
+        targetStart,
+      );
+    }
+    return { imageData: placed, offsetX, offsetY };
+  }
+
+  function positionTemplate(requestedX, requestedY) {
+    if (state.editorKind !== "hq" || !state.templateSource || state.paintActive) return;
+    const placed = placeTemplateOnEditor(state.templateSource, requestedX, requestedY);
+    state.target = placed.imageData;
+    state.templateOffsetX = placed.offsetX;
+    state.templateOffsetY = placed.offsetY;
+    persistTarget();
+    syncControls();
+    renderOverlay();
+    setStatus(`Template positioned at X ${placed.offsetX}, Y ${placed.offsetY}.`);
+  }
+
+  function beginTemplateMove() {
+    if (
+      state.editorKind !== "hq"
+      || !state.templateSource
+      || !state.target
+      || state.paintActive
+      || state.hidden
+    ) return;
+    state.templateMoveActive = true;
+    state.templateMoveDragging = false;
+    state.templateMoveOriginX = state.templateOffsetX;
+    state.templateMoveOriginY = state.templateOffsetY;
+    state.templateMoveDraftX = state.templateOffsetX;
+    state.templateMoveDraftY = state.templateOffsetY;
+    syncControls();
+    renderOverlay();
+    setStatus("Drag the template, then confirm or cancel its new position.");
+  }
+
+  function previewTemplateMove(requestedX, requestedY) {
+    if (!state.templateMoveActive || !state.templateSource) return;
+    const position = resolveTemplatePosition(
+      state.width,
+      state.height,
+      state.templateSource.width,
+      state.templateSource.height,
+      requestedX,
+      requestedY,
+    );
+    state.templateMoveDraftX = position.x;
+    state.templateMoveDraftY = position.y;
+    syncTemplateMoveUi();
+    renderOverlay();
+  }
+
+  function queueTemplateMovePreview(requestedX, requestedY) {
+    state.templateMovePending = { x: requestedX, y: requestedY };
+    if (state.templateMoveFrame) return;
+    state.templateMoveFrame = requestAnimationFrame(() => {
+      state.templateMoveFrame = 0;
+      flushTemplateMovePreview();
+    });
+  }
+
+  function flushTemplateMovePreview() {
+    const pending = state.templateMovePending;
+    state.templateMovePending = null;
+    if (pending) previewTemplateMove(pending.x, pending.y);
+  }
+
+  function finishTemplateMoveState() {
+    if (state.templateMoveFrame) cancelAnimationFrame(state.templateMoveFrame);
+    state.templateMoveFrame = 0;
+    state.templateMovePending = null;
+    state.templateMoveActive = false;
+    state.templateMoveDragging = false;
+    syncTemplateMoveUi();
+  }
+
+  function confirmTemplateMove() {
+    if (!state.templateMoveActive) return;
+    flushTemplateMovePreview();
+    const x = state.templateMoveDraftX;
+    const y = state.templateMoveDraftY;
+    finishTemplateMoveState();
+    positionTemplate(x, y);
+  }
+
+  function cancelTemplateMove() {
+    if (!state.templateMoveActive) return;
+    const x = state.templateMoveOriginX;
+    const y = state.templateMoveOriginY;
+    finishTemplateMoveState();
+    syncControls();
+    renderOverlay();
+    setStatus(`Template move cancelled; kept X ${x}, Y ${y}.`);
+  }
+
+  function syncTemplateMoveUi() {
+    const canvas = state.overlayCanvas;
+    const toolbar = state.templateMoveToolbar;
+    const moveButton = document.getElementById(`${PANEL_ID}-template-move`);
+    const templateX = document.getElementById(`${PANEL_ID}-template-x`);
+    const templateY = document.getElementById(`${PANEL_ID}-template-y`);
+    if (canvas) {
+      canvas.style.pointerEvents = state.templateMoveActive ? "auto" : "none";
+      canvas.style.cursor = state.templateMoveActive
+        ? (state.templateMoveDragging ? "grabbing" : "grab")
+        : "default";
+    }
+    if (moveButton) {
+      moveButton.textContent = state.templateMoveActive ? "Moving…" : "Move template";
+      moveButton.setAttribute("aria-pressed", String(state.templateMoveActive));
+      moveButton.disabled = !state.target
+        || state.paintActive
+        || state.hidden
+        || state.templateMoveActive;
+    }
+    if (templateX && state.templateMoveActive) {
+      templateX.value = String(state.templateMoveDraftX);
+    }
+    if (templateY && state.templateMoveActive) {
+      templateY.value = String(state.templateMoveDraftY);
+    }
+    if (!toolbar) return;
+    toolbar.hidden = !state.templateMoveActive || !state.templateSource;
+    if (toolbar.hidden) return;
+    const rect = editorSurfaceRect();
+    if (!rect?.width || !rect.height) {
+      toolbar.hidden = true;
+      return;
+    }
+    const centerX = state.templateMoveDraftX + state.templateSource.width / 2;
+    const viewportX = rect.left + (centerX / state.width) * rect.width;
+    const viewportY = rect.top + (state.templateMoveDraftY / state.height) * rect.height;
+    toolbar.style.left = `${Math.max(36, Math.min(innerWidth - 36, viewportX))}px`;
+    toolbar.style.top = `${Math.max(38, viewportY)}px`;
+  }
+
   function persistTarget() {
     if (!state.target) return;
     try {
+      const saved = {
+        width: state.target.width,
+        height: state.target.height,
+        templateWidth: state.templateWidth || state.target.width,
+        templateHeight: state.templateHeight || state.target.height,
+        templateOffsetX: state.templateOffsetX,
+        templateOffsetY: state.templateOffsetY,
+        name: state.sourceName,
+        opacity: state.opacity,
+        displayMode: state.displayMode,
+        mismatchesOnly: state.mismatchesOnly,
+        onlyUnpainted: state.onlyUnpainted,
+      };
+      if (state.editorKind === "hq") saved.indexedDb = true;
+      else saved.rgba = bytesToBase64(state.target.data);
       localStorage.setItem(
         storageKey(),
-        JSON.stringify({
-          rgba: bytesToBase64(state.target.data),
-          width: state.target.width,
-          height: state.target.height,
-          name: state.sourceName,
-          opacity: state.opacity,
-          displayMode: state.displayMode,
-          mismatchesOnly: state.mismatchesOnly,
-          onlyUnpainted: state.onlyUnpainted,
-        }),
+        JSON.stringify(saved),
       );
     } catch (error) {
       console.warn(`${SCRIPT_ID}: unable to save the local template`, error);
@@ -531,11 +946,30 @@ import {
   }
 
   async function restoreTarget() {
+    finishTemplateMoveState();
     state.target = null;
+    state.templateSource = null;
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey()) || "null");
-      if (!saved?.rgba && !saved?.image) return;
-      if (saved.rgba) {
+      if (!saved?.rgba && !saved?.image && !saved?.indexedDb) return;
+      if (saved.indexedDb) {
+        const file = await readLargeTemplate(storageKey());
+        if (!file) throw new Error("The saved HQ template file is missing.");
+        const decoded = await decodePngSamples(file, state.width, state.height, true);
+        const validationError = validateTemplate(decoded);
+        if (validationError) throw new Error(`Saved template is no longer valid: ${validationError}`);
+        const placed = placeTemplateOnEditor(
+          decoded,
+          saved.templateOffsetX,
+          saved.templateOffsetY,
+        );
+        state.templateSource = decoded;
+        state.target = placed.imageData;
+        state.templateWidth = decoded.width;
+        state.templateHeight = decoded.height;
+        state.templateOffsetX = placed.offsetX;
+        state.templateOffsetY = placed.offsetY;
+      } else if (saved.rgba) {
         if (saved.width !== state.width || saved.height !== state.height) {
           throw new Error("Saved template dimensions do not match this editor.");
         }
@@ -544,8 +978,18 @@ import {
           throw new Error("Saved template pixel data has an unexpected size.");
         }
         state.target = new ImageData(rgba, state.width, state.height);
+        state.templateSource = state.target;
+        state.templateWidth = saved.templateWidth || state.width;
+        state.templateHeight = saved.templateHeight || state.height;
+        state.templateOffsetX = saved.templateOffsetX || 0;
+        state.templateOffsetY = saved.templateOffsetY || 0;
       } else {
         state.target = await urlToImageData(saved.image, state.width, state.height);
+        state.templateSource = state.target;
+        state.templateWidth = state.width;
+        state.templateHeight = state.height;
+        state.templateOffsetX = 0;
+        state.templateOffsetY = 0;
       }
       const validationError = validateTemplate(state.target);
       if (validationError) throw new Error(`Saved template is no longer valid: ${validationError}`);
@@ -571,15 +1015,25 @@ import {
     canvas.style.display = state.hidden ? "none" : "block";
     if (!state.target) {
       canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+      syncTemplateMoveUi();
       return;
     }
     if (state.hidden) return;
 
+    if (state.templateMoveActive && state.templateSource) {
+      renderOverlayImage(
+        state.templateSource,
+        state.templateMoveDraftX,
+        state.templateMoveDraftY,
+      );
+      syncTemplateMoveUi();
+      return;
+    }
+
     const output = new ImageData(new Uint8ClampedArray(state.target.data), state.width, state.height);
     if (state.mismatchesOnly && !state.paintActive) {
       try {
-        const actual = state.baseCanvas.getContext("2d", { willReadFrequently: true })
-          .getImageData(0, 0, state.width, state.height).data;
+        const actual = readEditorPixels().data;
         for (let index = 0; index < output.data.length; index += 4) {
           const targetAlpha = output.data[index + 3];
           if (targetAlpha < 64) {
@@ -597,6 +1051,20 @@ import {
       }
     }
 
+    renderOverlayImage(output, 0, 0);
+    const visiblePixels = countVisiblePixels(output);
+    if (!state.paintActive) {
+      setStatus(
+        state.mismatchesOnly
+          ? `${visiblePixels.toLocaleString()} pixels still differ.`
+          : `${countVisiblePixels(state.target).toLocaleString()} template pixels.`,
+      );
+    }
+  }
+
+  function renderOverlayImage(imageData, offsetX, offsetY) {
+    const canvas = state.overlayCanvas;
+    if (!canvas) return;
     const scale = state.displayMode === "center" ? 3 : 1;
     const renderWidth = state.width * scale;
     const renderHeight = state.height * scale;
@@ -605,29 +1073,23 @@ import {
     const context = canvas.getContext("2d", { willReadFrequently: true });
     context.clearRect(0, 0, canvas.width, canvas.height);
     if (scale === 1) {
-      context.putImageData(output, 0, 0);
+      context.putImageData(imageData, offsetX, offsetY);
     } else {
-      const centered = context.createImageData(renderWidth, renderHeight);
-      for (let y = 0; y < state.height; y += 1) {
-        for (let x = 0; x < state.width; x += 1) {
-          const source = (y * state.width + x) * 4;
-          if (output.data[source + 3] === 0) continue;
-          const target = ((y * 3 + 1) * renderWidth + x * 3 + 1) * 4;
-          centered.data[target] = output.data[source];
-          centered.data[target + 1] = output.data[source + 1];
-          centered.data[target + 2] = output.data[source + 2];
-          centered.data[target + 3] = output.data[source + 3];
+      const centeredWidth = imageData.width * 3;
+      const centeredHeight = imageData.height * 3;
+      const centered = context.createImageData(centeredWidth, centeredHeight);
+      for (let y = 0; y < imageData.height; y += 1) {
+        for (let x = 0; x < imageData.width; x += 1) {
+          const source = (y * imageData.width + x) * 4;
+          if (imageData.data[source + 3] === 0) continue;
+          const target = ((y * 3 + 1) * centeredWidth + x * 3 + 1) * 4;
+          centered.data[target] = imageData.data[source];
+          centered.data[target + 1] = imageData.data[source + 1];
+          centered.data[target + 2] = imageData.data[source + 2];
+          centered.data[target + 3] = imageData.data[source + 3];
         }
       }
-      context.putImageData(centered, 0, 0);
-    }
-    const visiblePixels = countVisiblePixels(output);
-    if (!state.paintActive) {
-      setStatus(
-        state.mismatchesOnly
-          ? `${visiblePixels.toLocaleString()} pixels still differ.`
-          : `${countVisiblePixels(state.target).toLocaleString()} template pixels.`,
-      );
+      context.putImageData(centered, offsetX * 3, offsetY * 3);
     }
   }
 
@@ -698,9 +1160,19 @@ import {
     return true;
   }
 
+  function readHqCharges() {
+    if (state.editorKind !== "hq") return null;
+    const match = state.root?.textContent.match(/\b([\d,]+)\s*\/\s*([\d,]+)\b/);
+    if (!match) return null;
+    return {
+      current: Number(match[1].replaceAll(",", "")),
+      maximum: Number(match[2].replaceAll(",", "")),
+    };
+  }
+
   function editorPixelFromClient(clientX, clientY) {
-    if (!state.baseCanvas) return null;
-    const rect = state.baseCanvas.getBoundingClientRect();
+    const rect = editorSurfaceRect();
+    if (!rect) return null;
     if (!rect.width || !rect.height) return null;
     const x = Math.floor(((clientX - rect.left) / rect.width) * state.width);
     const y = Math.floor(((clientY - rect.top) / rect.height) * state.height);
@@ -748,7 +1220,7 @@ import {
     const greenDelta = pixelData[index + 1] - color.rgb[1];
     const blueDelta = pixelData[index + 2] - color.rgb[2];
     if (redDelta === 0 && greenDelta === 0 && blueDelta === 0) return true;
-    return state.editorKind === "alliance"
+    return state.editorKind !== "profile"
       && redDelta ** 2 + greenDelta ** 2 + blueDelta ** 2 <= ALLIANCE_COLOR_TOLERANCE_SQUARED;
   }
 
@@ -768,12 +1240,11 @@ import {
   function buildPaintQueue(onlyColor = null) {
     if (!state.target) return [];
     const buckets = new Map(
-      state.editorKind === "alliance" ? activeAlliancePalette().map((color) => [colorKey(color), []]) : [],
+      state.editorKind !== "profile" ? activeAlliancePalette().map((color) => [colorKey(color), []]) : [],
     );
     let actual;
     try {
-      actual = state.baseCanvas.getContext("2d", { willReadFrequently: true })
-        .getImageData(0, 0, state.width, state.height).data;
+      actual = readEditorPixels().data;
     } catch (error) {
       console.warn(`${SCRIPT_ID}: could not read the editor canvas`, error);
       setStatus("Could not read the editor canvas.", "warn");
@@ -807,12 +1278,19 @@ import {
     return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
   }
 
-  async function waitForAllianceArtboard(runId) {
+  async function waitForPaintArtboard(runId) {
     const isConnected = () => (
-      state.editorKind === "alliance"
-      && ALLIANCE_SIZES.has(editorKey())
-      && state.root?.isConnected
-      && state.baseCanvas?.isConnected
+      state.root?.isConnected
+      && (
+        (state.editorKind === "alliance"
+          && ALLIANCE_SIZES.has(editorKey())
+          && state.baseCanvas?.isConnected)
+        || (state.editorKind === "hq"
+          && ENABLE_HQ_AUTO_PAINT
+          && HQ_SIZES.has(state.width)
+          && state.frame?.isConnected
+          && state.tileLayer?.isConnected)
+      )
     );
     if (isConnected()) return true;
 
@@ -961,8 +1439,9 @@ import {
   }
 
   function dispatchPaintEvents(item) {
-    const rect = state.baseCanvas.getBoundingClientRect();
-    if (!rect.width || !rect.height) return false;
+    const rect = editorSurfaceRect();
+    const target = paintEventTarget();
+    if (!rect?.width || !rect.height || !target) return false;
     const clientX = rect.left + ((item.x + 0.5) / state.width) * rect.width;
     const clientY = rect.top + ((item.y + 0.5) / state.height) * rect.height;
     const common = {
@@ -978,30 +1457,40 @@ import {
     };
 
     return withSyntheticPointerCapture(state.root, () => {
-      state.baseCanvas.dispatchEvent(new PointerEvent("pointermove", { ...common, buttons: 0 }));
-      state.baseCanvas.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
-      state.baseCanvas.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
+      target.dispatchEvent(new PointerEvent("pointermove", { ...common, buttons: 0 }));
+      target.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
+      target.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
       return true;
     });
   }
 
   async function dispatchPaintBatch(items, runId) {
     while (state.viewportRestoring) await nextFrame();
-    if (!await waitForAllianceArtboard(runId)) return { ok: false, dispatched: 0 };
+    if (!await waitForPaintArtboard(runId)) return { ok: false, dispatched: 0 };
     if (!preparePaintColor(items[0].color)) {
       return { ok: false, dispatched: 0, message: state.paintFailureMessage };
     }
     await wait(0);
 
-    const dispatchedCanvas = state.baseCanvas;
+    const dispatchedSurface = paintEventTarget();
     let dispatched = 0;
     for (const item of items) {
       if (runId !== state.paintRunId) return { ok: true, dispatched, stopped: true };
-      if (state.baseCanvas !== dispatchedCanvas || !dispatchedCanvas.isConnected) {
+      if (state.editorKind === "hq") {
+        const liveCharges = readHqCharges()?.current;
+        if (Number.isFinite(liveCharges)) {
+          state.hqChargesRemaining = Math.min(state.hqChargesRemaining, liveCharges);
+        }
+        if (!state.hqChargesRemaining || state.hqChargesRemaining <= 0) {
+          return { ok: true, dispatched, outOfCharges: true };
+        }
+      }
+      if (paintEventTarget() !== dispatchedSurface || !dispatchedSurface?.isConnected) {
         return { ok: true, dispatched, refreshed: true };
       }
       if (!dispatchPaintEvents(item)) return { ok: false, dispatched, failedItem: item };
       dispatched += 1;
+      if (state.editorKind === "hq") state.hqChargesRemaining -= 1;
     }
     return { ok: true, dispatched };
   }
@@ -1017,7 +1506,7 @@ import {
     const label = document.getElementById(`${PANEL_ID}-paint-label`);
     const progress = document.getElementById(`${PANEL_ID}-progress`);
     if (start) {
-      start.disabled = state.paintActive || !state.target;
+      start.disabled = state.paintActive || state.templateMoveActive || !state.target;
       start.textContent = state.editorKind === "profile" ? "Fill now" : "Auto-paint";
     }
     if (label) label.textContent = state.editorKind === "profile" ? "Local fill" : "Paint queue";
@@ -1050,6 +1539,7 @@ import {
     state.paintIndex = 0;
     state.paintColor = null;
     state.paintFailureMessage = null;
+    state.hqChargesRemaining = null;
     syncPaintControls();
     if (message) setStatus(message);
   }
@@ -1127,15 +1617,28 @@ import {
     const isProfile = state.editorKind === "profile"
       && location.pathname.replace(/\/+$/, "") === "/profile-picture"
       && editorKey() === PROFILE_SIZE;
-    if (!state.root?.isConnected || (!isAlliance && !isProfile)) {
+    const isHq = ENABLE_HQ_AUTO_PAINT
+      && state.editorKind === "hq"
+      && state.root?.getAttribute("aria-label") === "Headquarters canvas"
+      && HQ_SIZES.has(state.width);
+    if (!state.root?.isConnected || (!isAlliance && !isProfile && !isHq)) {
       setStatus("Auto-paint is only available inside a supported Wplace asset editor.", "warn");
       return;
     }
 
-    const lockedColor = isAlliance && state.paintSelectedColorOnly
+    const hqCharges = isHq ? readHqCharges() : null;
+    if (isHq && (!hqCharges || hqCharges.current <= 0)) {
+      setStatus(
+        hqCharges ? "HQ charges are empty; auto-paint did not start." : "Could not read the HQ charge counter.",
+        "warn",
+      );
+      return;
+    }
+    const paletteEditor = isAlliance || isHq;
+    const lockedColor = paletteEditor && state.paintSelectedColorOnly
       ? readSelectedPaletteColor(state.root)
       : null;
-    if (isAlliance && state.paintSelectedColorOnly && !lockedColor) {
+    if (paletteEditor && state.paintSelectedColorOnly && !lockedColor) {
       setStatus("Select a Wplace palette color before starting selected-color auto-paint.", "warn");
       return;
     }
@@ -1155,7 +1658,7 @@ import {
       return;
     }
     if (!ensurePaintTool()) {
-      setStatus("Could not activate Wplace's alliance Paint tool.", "warn");
+      setStatus(`Could not activate Wplace's ${isHq ? "HQ" : "alliance"} Paint tool.`, "warn");
       return;
     }
 
@@ -1166,6 +1669,7 @@ import {
     state.paintPaused = false;
     state.paintColor = null;
     state.paintFailureMessage = null;
+    state.hqChargesRemaining = hqCharges?.current ?? null;
     syncPaintControls();
     let dispatchedCount = 0;
     let dispatchedSinceRecycle = 0;
@@ -1174,13 +1678,13 @@ import {
     while (state.paintIndex < state.paintQueue.length && runId === state.paintRunId) {
       while (state.paintPaused && runId === state.paintRunId) await wait(100);
       if (runId !== state.paintRunId) return;
-      if (!await waitForAllianceArtboard(runId)) {
+      if (!await waitForPaintArtboard(runId)) {
         if (runId !== state.paintRunId) return;
-        stopAutoFill("Wplace did not restore the alliance artboard; auto-paint stopped.");
+        stopAutoFill("Wplace did not restore the paint artboard; auto-paint stopped.");
         return;
       }
       if (state.root !== paintEditorRoot || !paintEditorRoot?.isConnected) {
-        if (!state.paintIntervalEnabled) {
+        if (isAlliance && !state.paintIntervalEnabled) {
           const reopened = await reopenAllianceEditorAfterRefresh(runId, state.root);
           if (runId !== state.paintRunId) return;
           if (!reopened) {
@@ -1193,12 +1697,13 @@ import {
             continue;
           }
         }
+        state.paintColor = null;
         paintEditorRoot = state.root;
       }
       const item = state.paintQueue[state.paintIndex];
       const batch = [];
       const batchColor = colorKey(item.color);
-      const batchLimit = state.paintIntervalEnabled ? 1 : UNPACED_BATCH_SIZE;
+      const batchLimit = state.paintIntervalEnabled || isHq ? 1 : UNPACED_BATCH_SIZE;
       for (
         let index = state.paintIndex;
         index < state.paintQueue.length && batch.length < batchLimit;
@@ -1214,6 +1719,10 @@ import {
         dispatchedCount += result.dispatched;
         dispatchedSinceRecycle += result.dispatched;
         state.paintIndex += result.dispatched;
+      }
+      if (result.outOfCharges) {
+        stopAutoFill("HQ charges exhausted; auto-paint stopped.");
+        return;
       }
       if (result.refreshed) continue;
       if (!result.ok) {
@@ -1234,7 +1743,7 @@ import {
       );
       if (state.paintIntervalEnabled) await wait(state.paintDelay);
 
-      if (shouldRecycleAllianceEditor({
+      if (isAlliance && shouldRecycleAllianceEditor({
         dispatchedSinceRecycle,
         intervalEnabled: state.paintIntervalEnabled,
         queueRemaining: state.paintQueue.length - state.paintIndex,
@@ -1281,6 +1790,12 @@ import {
     const title = document.getElementById(`${PANEL_ID}-title`);
     const size = document.getElementById(`${PANEL_ID}-size`);
     const templateNote = document.getElementById(`${PANEL_ID}-template-note`);
+    const templateX = document.getElementById(`${PANEL_ID}-template-x`);
+    const templateY = document.getElementById(`${PANEL_ID}-template-y`);
+    const templateCenter = document.getElementById(`${PANEL_ID}-template-center`);
+    const templateMove = document.getElementById(`${PANEL_ID}-template-move`);
+    const load = document.getElementById(`${PANEL_ID}-load`);
+    const clear = document.getElementById(`${PANEL_ID}-clear`);
     if (opacity) opacity.value = String(Math.round(state.opacity * 100));
     if (opacityValue) opacityValue.textContent = `${Math.round(state.opacity * 100)}%`;
     if (displayMode) displayMode.value = state.displayMode;
@@ -1293,14 +1808,40 @@ import {
     }
     if (preserveView) preserveView.checked = state.preserveView;
     if (visibility) visibility.textContent = state.hidden ? "Show" : "Hide";
-    if (title) title.textContent = "Reference";
+    if (title) title.textContent = state.editorKind === "hq" ? "HQ reference" : "Reference";
     if (size) size.textContent = editorKey();
     if (templateNote) {
       templateNote.textContent = state.editorKind === "profile"
         ? "Raw PNG · any RGB"
+        : state.editorKind === "hq"
+        ? "Raw PNG · ≤ canvas"
         : "Raw PNG · exact palette";
     }
+    const maxTemplateX = Math.max(0, state.width - state.templateWidth);
+    const maxTemplateY = Math.max(0, state.height - state.templateHeight);
+    if (templateX) {
+      templateX.max = String(maxTemplateX);
+      templateX.value = String(
+        state.templateMoveActive ? state.templateMoveDraftX : state.templateOffsetX,
+      );
+      templateX.disabled = !state.target || state.paintActive;
+    }
+    if (templateY) {
+      templateY.max = String(maxTemplateY);
+      templateY.value = String(
+        state.templateMoveActive ? state.templateMoveDraftY : state.templateOffsetY,
+      );
+      templateY.disabled = !state.target || state.paintActive;
+    }
+    if (templateCenter) templateCenter.disabled = !state.target || state.paintActive;
+    if (load) load.disabled = state.templateMoveActive;
+    if (clear) clear.disabled = state.templateMoveActive;
+    if (templateMove) templateMove.disabled = !state.target
+      || state.paintActive
+      || state.hidden
+      || state.templateMoveActive;
     syncPaintControls();
+    syncTemplateMoveUi();
   }
 
   async function loadFile(file) {
@@ -1309,15 +1850,28 @@ import {
       return;
     }
     try {
+      if (state.templateMoveActive) cancelTemplateMove();
       setStatus("Reading raw PNG pixels…");
-      const imageData = await decodePngSamples(file, state.width, state.height);
+      const imageData = await decodePngSamples(
+        file,
+        state.width,
+        state.height,
+        state.editorKind === "hq",
+      );
       const validationError = validateTemplate(imageData);
       if (validationError) {
         setStatus(validationError, "warn");
         return;
       }
       state.sourceName = file.name.replace(/\.[^.]+$/, "") || "reference";
-      state.target = imageData;
+      state.templateSource = imageData;
+      state.templateWidth = imageData.width;
+      state.templateHeight = imageData.height;
+      const placed = placeTemplateOnEditor(imageData);
+      state.templateOffsetX = placed.offsetX;
+      state.templateOffsetY = placed.offsetY;
+      state.target = placed.imageData;
+      if (state.editorKind === "hq") await writeLargeTemplate(storageKey(), file);
       persistTarget();
       syncControls();
       renderOverlay();
@@ -1328,9 +1882,20 @@ import {
   }
 
   function clearTarget() {
+    if (state.templateMoveActive) cancelTemplateMove();
     stopAutoFill(null);
     state.target = null;
+    state.templateSource = null;
+    state.templateWidth = 0;
+    state.templateHeight = 0;
+    state.templateOffsetX = 0;
+    state.templateOffsetY = 0;
     localStorage.removeItem(storageKey());
+    if (state.editorKind === "hq") {
+      deleteLargeTemplate(storageKey()).catch((error) => {
+        console.warn(`${SCRIPT_ID}: unable to clear the saved HQ template`, error);
+      });
+    }
     syncControls();
     renderOverlay();
     setStatus("Template cleared.");
@@ -1482,8 +2047,12 @@ import {
       #${PANEL_ID} .waa-icon { width: 32px; padding: 3px; font-size: 11px; }
       #${PANEL_ID} .waa-file { display: none; }
       #${PANEL_ID} .waa-profile-only { display: none; }
+      #${PANEL_ID} .waa-hq-only { display: none; }
+      #${PANEL_ID}[data-editor="hq"] .waa-hq-only { display: flex; }
+      #${PANEL_ID} .waa-position-label { color: var(--waa-muted); }
       #${PANEL_ID}[data-editor="profile"] .waa-alliance-only { display: none; }
       #${PANEL_ID}[data-editor="profile"] .waa-profile-only { display: inline; }
+      #${PANEL_ID}[data-editor="hq"][data-hq-auto-paint="false"] .waa-paint { display: none; }
       @container (max-width: 780px) {
         #${PANEL_ID} .waa-body { grid-template-columns: 1fr 1fr; }
         #${PANEL_ID} .waa-paint { grid-column: 1 / -1; border-top: 1px solid var(--waa-border); border-left: 0 !important; }
@@ -1498,6 +2067,42 @@ import {
       @media (prefers-reduced-motion: reduce) {
         #${PANEL_ID} .waa-progress > span { transition: none; }
       }
+      .${MOVE_TOOLBAR_CLASS} {
+        position: fixed;
+        z-index: 2147483646;
+        display: flex;
+        gap: 4px;
+        transform: translate(-50%, calc(-100% - 6px));
+        padding: 4px;
+        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 9px;
+        background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+        box-shadow: 0 4px 14px color-mix(in srgb, CanvasText 18%, transparent);
+        color: CanvasText;
+        user-select: none;
+      }
+      .${MOVE_TOOLBAR_CLASS}[hidden] { display: none; }
+      .${MOVE_TOOLBAR_CLASS} button {
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+        border-radius: 6px;
+        background: color-mix(in srgb, Canvas 88%, CanvasText 12%);
+        color: inherit;
+        font: 700 16px/1 ui-sans-serif, system-ui, sans-serif;
+        cursor: pointer;
+      }
+      .${MOVE_TOOLBAR_CLASS} button[data-action="confirm"] {
+        border-color: #1677ff;
+        background: #1677ff;
+        color: #f8fbff;
+      }
+      .${MOVE_TOOLBAR_CLASS} button:hover { filter: brightness(0.94); }
+      .${MOVE_TOOLBAR_CLASS} button:focus-visible {
+        outline: 2px solid color-mix(in srgb, #1677ff 72%, transparent);
+        outline-offset: 2px;
+      }
     `;
     document.head.append(style);
   }
@@ -1508,6 +2113,7 @@ import {
     panel.id = PANEL_ID;
     panel.dataset.collapsed = String(state.collapsed);
     panel.dataset.editor = state.editorKind;
+    panel.dataset.hqAutoPaint = String(ENABLE_HQ_AUTO_PAINT);
     panel.dataset.version = SCRIPT_VERSION;
     panel.innerHTML = `
       <div class="waa-head">
@@ -1524,6 +2130,17 @@ import {
             <input class="waa-file" id="${PANEL_ID}-file" type="file" accept="image/png">
             <span class="waa-note waa-grow" id="${PANEL_ID}-template-note">Raw PNG · exact palette</span>
             <button class="waa-quiet" id="${PANEL_ID}-clear" type="button">Clear</button>
+          </div>
+          <div class="waa-row waa-hq-only">
+            <span class="waa-position-label">Top-left</span>
+            <label for="${PANEL_ID}-template-x">X</label>
+            <input id="${PANEL_ID}-template-x" aria-label="Template X coordinate" type="number" min="0" step="1" value="0">
+            <label for="${PANEL_ID}-template-y">Y</label>
+            <input id="${PANEL_ID}-template-y" aria-label="Template Y coordinate" type="number" min="0" step="1" value="0">
+          </div>
+          <div class="waa-row waa-hq-only">
+            <button class="waa-grow" id="${PANEL_ID}-template-move" type="button" aria-pressed="false">Move template</button>
+            <button class="waa-quiet" id="${PANEL_ID}-template-center" type="button">Center</button>
           </div>
         </section>
         <section class="waa-group">
@@ -1607,6 +2224,7 @@ import {
       persistTarget();
     });
     panel.querySelector(`#${PANEL_ID}-visibility`).addEventListener("click", () => {
+      if (state.templateMoveActive) cancelTemplateMove();
       state.hidden = !state.hidden;
       syncControls();
       renderOverlay();
@@ -1656,6 +2274,29 @@ import {
     });
     panel.querySelector(`#${PANEL_ID}-refresh`).addEventListener("click", renderOverlay);
     panel.querySelector(`#${PANEL_ID}-clear`).addEventListener("click", clearTarget);
+    const templateX = panel.querySelector(`#${PANEL_ID}-template-x`);
+    const templateY = panel.querySelector(`#${PANEL_ID}-template-y`);
+    const applyTemplatePosition = () => {
+      if (templateX.value === "" || templateY.value === "") return;
+      const x = Number(templateX.value);
+      const y = Number(templateY.value);
+      if (state.templateMoveActive) previewTemplateMove(x, y);
+      else positionTemplate(x, y);
+    };
+    templateX.addEventListener("input", applyTemplatePosition);
+    templateY.addEventListener("input", applyTemplatePosition);
+    panel.querySelector(`#${PANEL_ID}-template-center`).addEventListener("click", () => {
+      if (!state.templateSource) return;
+      const centered = resolveTemplatePosition(
+        state.width,
+        state.height,
+        state.templateSource.width,
+        state.templateSource.height,
+      );
+      if (state.templateMoveActive) previewTemplateMove(centered.x, centered.y);
+      else positionTemplate(centered.x, centered.y);
+    });
+    panel.querySelector(`#${PANEL_ID}-template-move`).addEventListener("click", beginTemplateMove);
     panel.querySelector(`#${PANEL_ID}-paint-interval`).addEventListener("change", (event) => {
       state.paintIntervalEnabled = event.target.checked;
       persistSettings();
@@ -1698,23 +2339,28 @@ import {
     const sameAsset = Boolean(state.root)
       && state.editorKind === editor.kind
       && state.width === editor.width
-      && state.height === editor.height;
+      && state.height === editor.height
+      && state.assetId === (editor.assetId || null);
     const changedEditor = state.root !== editor.root
       || state.baseCanvas !== editor.baseCanvas
+      || state.tileLayer !== (editor.tileLayer || null)
       || state.editorKind !== editor.kind
       || state.width !== editor.width
       || state.height !== editor.height;
     if (!changedEditor && document.getElementById(PANEL_ID) && state.overlayCanvas?.isConnected) return;
 
     if (state.paintActive && !sameAsset) stopAutoFill("The asset editor changed; auto-paint stopped.");
+    if (changedEditor && state.templateMoveActive) finishTemplateMoveState();
     if (sameAsset) state.paintColor = null;
 
     state.editorKind = editor.kind;
     state.root = editor.root;
     state.frame = editor.frame;
     state.baseCanvas = editor.baseCanvas;
+    state.tileLayer = editor.tileLayer || null;
     state.width = editor.width;
     state.height = editor.height;
+    state.assetId = editor.assetId || null;
     state.paletteColors = [...alliancePalette(editor.root)];
     state.viewportRestoring = true;
     try {
@@ -1723,6 +2369,7 @@ import {
       state.viewportRestoring = false;
     }
     state.overlayCanvas = makeOverlayCanvas(editor.frame, editor.width, editor.height);
+    ensureTemplateMoveToolbar(editor.frame);
     injectStyles();
     buildPanel(editor.root);
     installTemplateColorPicker(editor.root);
@@ -1748,6 +2395,7 @@ import {
       scanQueued = false;
       const editor = readEditor();
       if (editor) await attach(editor);
+      else if (state.templateMoveActive) finishTemplateMoveState();
     });
   }
 
