@@ -94,7 +94,6 @@ import {
     frame: null,
     baseCanvas: null,
     tileLayer: null,
-    assetId: null,
     overlayCanvas: null,
     target: null,
     templateSource: null,
@@ -178,10 +177,17 @@ import {
   }
 
   function storageKey() {
-    if (state.editorKind === "hq") {
-      return `${STORAGE_PREFIX}hq:${state.assetId || "current"}:${editorKey()}`;
-    }
+    if (state.editorKind === "hq") return `${STORAGE_PREFIX}hq:${editorKey()}`;
     return `${STORAGE_PREFIX}${editorKey()}`;
+  }
+
+  // Templates saved before the key stopped including the revision counter.
+  function legacyHqStorageKeys() {
+    const suffix = `:${editorKey()}`;
+    const prefix = `${STORAGE_PREFIX}hq:`;
+    return Object.keys(localStorage).filter((key) => (
+      key !== storageKey() && key.startsWith(prefix) && key.endsWith(suffix)
+    )).sort();
   }
 
   function persistSettings() {
@@ -275,8 +281,6 @@ import {
     const frame = [...root.children].find((child) => child.classList.contains("artboard-frame"));
     const tileLayer = frame?.querySelector(".hq-tile-layer");
     if (!frame || !tileLayer) return null;
-    const eventMatch = root.closest('[role="dialog"], dialog')?.textContent.match(/Event\s+#([\d,]+)/i);
-    const assetId = eventMatch ? `event-${eventMatch[1].replaceAll(",", "")}` : "current";
     return {
       kind: "hq",
       root,
@@ -285,7 +289,6 @@ import {
       tileLayer,
       width: size,
       height: size,
-      assetId,
     };
   }
 
@@ -641,6 +644,43 @@ import {
       });
     } finally {
       database.close();
+    }
+  }
+
+  async function listLargeTemplateKeys() {
+    const database = await openTemplateDatabase();
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = database.transaction("templates", "readonly");
+        const request = transaction.objectStore("templates").getAllKeys();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error || new Error("Could not list stored templates."));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  // Earlier builds keyed HQ templates by the live revision counter, so each load
+  // wrote a record nothing would ever read again. Adopt the newest of those for
+  // this canvas, then drop every blob no longer referenced by localStorage.
+  async function reclaimLegacyHqTemplates() {
+    const legacyKeys = legacyHqStorageKeys();
+    const adoptable = legacyKeys.at(-1);
+    if (adoptable && !localStorage.getItem(storageKey())) {
+      const file = await readLargeTemplate(adoptable);
+      if (file) {
+        await writeLargeTemplate(storageKey(), file);
+        localStorage.setItem(storageKey(), localStorage.getItem(adoptable));
+      }
+    }
+    for (const key of legacyKeys) localStorage.removeItem(key);
+  }
+
+  async function pruneOrphanedTemplates() {
+    const live = new Set(Object.keys(localStorage).filter((key) => key.startsWith(STORAGE_PREFIX)));
+    for (const key of await listLargeTemplateKeys()) {
+      if (!live.has(key)) await deleteLargeTemplate(key);
     }
   }
 
@@ -1038,6 +1078,10 @@ import {
     state.target = null;
     state.templateSource = null;
     try {
+      if (state.editorKind === "hq") {
+        await reclaimLegacyHqTemplates();
+        await pruneOrphanedTemplates();
+      }
       const saved = JSON.parse(localStorage.getItem(storageKey()) || "null");
       if (!saved?.rgba && !saved?.image && !saved?.indexedDb) return;
       if (saved.indexedDb) {
@@ -2360,8 +2404,7 @@ import {
     const sameAsset = Boolean(state.root)
       && state.editorKind === editor.kind
       && state.width === editor.width
-      && state.height === editor.height
-      && state.assetId === (editor.assetId || null);
+      && state.height === editor.height;
     const changedEditor = state.root !== editor.root
       || state.baseCanvas !== editor.baseCanvas
       || state.tileLayer !== (editor.tileLayer || null)
@@ -2381,7 +2424,6 @@ import {
     state.tileLayer = editor.tileLayer || null;
     state.width = editor.width;
     state.height = editor.height;
-    state.assetId = editor.assetId || null;
     state.paletteColors = [...alliancePalette(editor.root)];
     state.viewportRestoring = true;
     try {
