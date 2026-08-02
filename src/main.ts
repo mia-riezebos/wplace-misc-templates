@@ -51,12 +51,50 @@ import {
   const ALLIANCE_NATURAL_REFRESH_WAIT_MS = 7000;
   const UNPACED_BATCH_SIZE = 50;
 
+  /*
+   * Wplace ships the whole DaisyUI 5 component layer, so component classes
+   * (btn, select, toggle, range, input) always resolve. Tailwind utilities are
+   * JIT-compiled from Wplace's own source, so only classes observed on these
+   * editor routes are used here; anything else lives in the scoped CSS below.
+   * Icons are Material Symbols paths on Wplace's 0 -960 960 960 grid.
+   */
+  const ICON = {
+    layers: "M480-118 120-398l66-50 294 228 294-228 66 50-360 280Zm0-202L120-600l360-280 360 280-360 280Zm0-280Zm0 178 230-178-230-178-230 178 230 178Z",
+    upload: "M280-160v-80h400v80H280Zm160-160v-327L336-544l-56-56 200-200 200 200-56 56-104-103v327h-80Z",
+    delete: "M280-120q-33 0-56.5-23.5T200-200v-520h-40v-80h200v-40h240v40h200v80h-40v520q0 33-23.5 56.5T680-120H280Zm400-600H280v520h400v-520ZM360-280h80v-360h-80v360Zm160 0h80v-360h-80v360ZM280-720v520-520Z",
+    expandLess: "M480-528 296-344l-56-56 240-240 240 240-56 56-184-184Z",
+    expandMore: "M480-344 240-584l56-56 184 184 184-184 56 56-240 240Z",
+    visibility: "M480-320q75 0 127.5-52.5T660-500q0-75-52.5-127.5T480-680q-75 0-127.5 52.5T300-500q0 75 52.5 127.5T480-320Zm0-72q-45 0-76.5-31.5T372-500q0-45 31.5-76.5T480-608q45 0 76.5 31.5T588-500q0 45-31.5 76.5T480-392Zm0 192q-146 0-266-81.5T40-500q54-137 174-218.5T480-800q146 0 266 81.5T920-500q-54 137-174 218.5T480-200Zm0-80q113 0 207.5-59.5T832-500q-50-101-144.5-160.5T480-720q-113 0-207.5 59.5T128-500q50 101 144.5 160.5T480-280Z",
+    visibilityOff: "M480-320q75 0 127.5-52.5T660-500q0-75-52.5-127.5T480-680q-75 0-127.5 52.5T300-500q0 75 52.5 127.5T480-320Zm0-72q-45 0-76.5-31.5T372-500q0-45 31.5-76.5T480-608q45 0 76.5 31.5T588-500q0 45-31.5 76.5T480-392Zm0 192q-146 0-266-81.5T40-500q54-137 174-218.5T480-800q146 0 266 81.5T920-500q-54 137-174 218.5T480-200Zm0-80q113 0 207.5-59.5T832-500q-50-101-144.5-160.5T480-720q-113 0-207.5 59.5T128-500q50 101 144.5 160.5T480-280Zm312 200L168-704l56-56 624 624-56 56Z",
+    refresh: "M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z",
+    play: "M320-200v-560l440 280-440 280Z",
+    pause: "M520-200v-560h240v560H520Zm-320 0v-560h240v560H200Z",
+    stop: "M320-320h320v-320H320v320Z",
+    info: "M440-280h80v-240h-80v240Zm40-320q17 0 28.5-11.5T520-640q0-17-11.5-28.5T480-680q-17 0-28.5 11.5T440-640q0 17 11.5 28.5T480-600Zm0 520q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z",
+    warning: "m40-120 440-760 440 760H40Zm138-80h604L480-720 178-200Zm302-40q17 0 28.5-11.5T520-280q0-17-11.5-28.5T480-320q-17 0-28.5 11.5T440-280q0 17 11.5 28.5T480-240Zm-40-120h80v-200h-80v200Zm40-100Z",
+    // HQ template placement
+    openWith: "M480-80 310-250l57-57 73 73v-166h80v165l72-73 58 58L480-80ZM250-310 80-480l169-169 57 57-72 72h166v80H235l73 73-58 57Zm460 0-57-57 73-73H560v-80h165l-73-72 58-58 170 170-170 170ZM440-560v-166l-73 73-57-57 170-170 170 170-58 58-72-73v165h-80Z",
+    center: "M200-120q-33 0-56.5-23.5T120-200v-160h80v160h160v80H200Zm400 0v-80h160v-160h80v160q0 33-23.5 56.5T760-120H600ZM120-600v-160q0-33 23.5-56.5T200-840h160v80H200v160h-80Zm640 0v-160H600v-80h160q33 0 56.5 23.5T840-760v160h-80ZM338.5-338.5Q280-397 280-480t58.5-141.5Q397-680 480-680t141.5 58.5Q680-563 680-480t-58.5 141.5Q563-280 480-280t-141.5-58.5ZM565-395q35-35 35-85t-35-85q-35-35-85-35t-85 35q-35 35-35 85t35 85q35 35 85 35t85-35Zm-85-85Z",
+    check: "M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z",
+    close: "m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 224-56 56-224-224-224 224Z",
+  };
+
+  function icon(name, size = "size-4") {
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor" class="${size}" aria-hidden="true"><path d="${ICON[name]}"></path></svg>`;
+  }
+
+  function setButtonFace(button, iconName, label) {
+    if (!button) return;
+    button.innerHTML = `${icon(iconName)}<span>${label}</span>`;
+  }
+
   const state = {
     editorKind: "alliance",
     root: null,
     frame: null,
     baseCanvas: null,
     tileLayer: null,
+    assetId: null,
     overlayCanvas: null,
     target: null,
     templateSource: null,
@@ -109,9 +147,8 @@ import {
     viewportRoot: null,
     viewportCaptureHandler: null,
     viewportRestoring: false,
-    statusMessage: "Load an image to begin.",
+    statusMessage: "Load a PNG to begin. Middle-click the overlay to pick that pixel\u2019s color.",
     statusKind: "normal",
-    assetId: null,
   };
 
   function activeAlliancePalette() {
@@ -155,6 +192,7 @@ import {
         paintSelectedColorOnly: state.paintSelectedColorOnly,
         paintPath: state.paintPath,
         paintDelay: state.paintDelay,
+        collapsed: state.collapsed,
       }));
     } catch (error) {
       console.warn(`${SCRIPT_ID}: unable to save settings`, error);
@@ -172,6 +210,7 @@ import {
       state.paintDelay = Number.isFinite(saved?.paintDelay)
         ? Math.max(1, Math.min(5000, saved.paintDelay))
         : 150;
+      state.collapsed = Boolean(saved?.collapsed);
     } catch (error) {
       console.warn(`${SCRIPT_ID}: unable to restore settings`, error);
     }
@@ -181,9 +220,16 @@ import {
     state.statusMessage = message;
     state.statusKind = kind;
     const status = document.getElementById(`${PANEL_ID}-status`);
-    if (!status) return;
-    status.textContent = message;
-    status.dataset.kind = kind;
+    const statusIcon = document.getElementById(`${PANEL_ID}-status-icon`);
+    if (status) {
+      status.textContent = message;
+      status.title = message;
+    }
+    if (statusIcon) {
+      // Warnings get a shape change as well as a hue, so the cue is not colour alone.
+      statusIcon.className = kind === "warn" ? "text-warning shrink-0" : "text-base-content/70 shrink-0";
+      statusIcon.innerHTML = icon(kind === "warn" ? "warning" : "info");
+    }
   }
 
   function readAllianceEditor() {
@@ -401,13 +447,15 @@ import {
     let toolbar = document.querySelector(`.${MOVE_TOOLBAR_CLASS}`);
     if (!toolbar) {
       toolbar = document.createElement("div");
-      toolbar.className = MOVE_TOOLBAR_CLASS;
+      // Mirrors Wplace's own floating overlay-edit panel: soft square buttons
+      // on a blurred base-100 surface with the box radius.
+      toolbar.className = `${MOVE_TOOLBAR_CLASS} rounded-box bg-base-100/95 border-base-300 flex items-center gap-1.5 border p-1.5 shadow-2xl backdrop-blur`;
       toolbar.hidden = true;
       toolbar.setAttribute("role", "toolbar");
       toolbar.setAttribute("aria-label", "Confirm or cancel template position");
       toolbar.innerHTML = `
-        <button type="button" data-action="confirm" aria-label="Confirm template position" title="Confirm position">✓</button>
-        <button type="button" data-action="cancel" aria-label="Cancel template position" title="Cancel repositioning">×</button>
+        <button class="btn btn-soft btn-sm btn-square" type="button" data-action="cancel" aria-label="Cancel template position" title="Cancel repositioning">${icon("close")}</button>
+        <button class="btn btn-primary btn-sm btn-square" type="button" data-action="confirm" aria-label="Confirm template position" title="Confirm position">${icon("check")}</button>
       `;
       for (const eventName of ["pointerdown", "pointerup", "click"]) {
         toolbar.addEventListener(eventName, (event) => event.stopPropagation());
@@ -423,6 +471,13 @@ import {
   function installTemplateMoveHandlers(canvas) {
     if (state.templateMoveHandlersInstalled) return;
     state.templateMoveHandlersInstalled = true;
+    // The toolbar is fixed-position chrome anchored to a pixel on the artboard,
+    // so it has to follow whenever the artboard moves under it.
+    const followSurface = () => {
+      if (state.templateMoveActive) requestAnimationFrame(syncTemplateMoveUi);
+    };
+    window.addEventListener("scroll", followSurface, { capture: true, passive: true });
+    window.addEventListener("resize", followSurface, { passive: true });
     window.addEventListener("pointerdown", (event) => {
       if (
         !state.templateMoveActive
@@ -889,7 +944,8 @@ import {
         : "default";
     }
     if (moveButton) {
-      moveButton.textContent = state.templateMoveActive ? "Moving…" : "Move template";
+      setButtonFace(moveButton, "openWith", state.templateMoveActive ? "Moving…" : "Move");
+      moveButton.className = state.templateMoveActive ? "btn btn-primary btn-sm gap-1" : "btn btn-sm gap-1";
       moveButton.setAttribute("aria-pressed", String(state.templateMoveActive));
       moveButton.disabled = !state.target
         || state.paintActive
@@ -913,8 +969,40 @@ import {
     const centerX = state.templateMoveDraftX + state.templateSource.width / 2;
     const viewportX = rect.left + (centerX / state.width) * rect.width;
     const viewportY = rect.top + (state.templateMoveDraftY / state.height) * rect.height;
-    toolbar.style.left = `${Math.max(36, Math.min(innerWidth - 36, viewportX))}px`;
-    toolbar.style.top = `${Math.max(38, viewportY)}px`;
+    const stage = visibleStageBox();
+    const halfWidth = (toolbar.offsetWidth || 84) / 2;
+    const clearance = (toolbar.offsetHeight || 46) + 8;
+    const clamp = (value, low, high) => Math.min(Math.max(value, low), Math.max(low, high));
+    toolbar.style.left = `${clamp(
+      viewportX,
+      stage.left + halfWidth,
+      stage.right - halfWidth,
+    )}px`;
+    toolbar.style.top = `${clamp(viewportY, stage.top + clearance, stage.bottom)}px`;
+  }
+
+  // The stage scrolls behind Wplace's sticky modal chrome, so its layout rect can
+  // reach far outside what the user can see. Intersect it with every clipping
+  // ancestor and the viewport to get the box the toolbar may actually sit in.
+  function visibleStageBox() {
+    let box = { left: 8, top: 8, right: innerWidth - 8, bottom: innerHeight - 8 };
+    const intersect = (rect) => {
+      box = {
+        left: Math.max(box.left, rect.left),
+        top: Math.max(box.top, rect.top),
+        right: Math.min(box.right, rect.right),
+        bottom: Math.min(box.bottom, rect.bottom),
+      };
+    };
+    for (let node = state.root; node instanceof Element; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (node === state.root || /auto|scroll|hidden/.test(`${style.overflowY}${style.overflowX}`)) {
+        intersect(node.getBoundingClientRect());
+      }
+    }
+    if (box.right <= box.left) box.right = box.left;
+    if (box.bottom <= box.top) box.bottom = box.top;
+    return box;
   }
 
   function persistTarget() {
@@ -1507,12 +1595,15 @@ import {
     const progress = document.getElementById(`${PANEL_ID}-progress`);
     if (start) {
       start.disabled = state.paintActive || state.templateMoveActive || !state.target;
-      start.textContent = state.editorKind === "profile" ? "Fill now" : "Auto-paint";
+      setButtonFace(start, "play", state.editorKind === "profile" ? "Fill draft" : "Auto-paint");
     }
-    if (label) label.textContent = state.editorKind === "profile" ? "Local fill" : "Paint queue";
+    if (label) label.textContent = state.editorKind === "profile" ? "Draft fill" : "Auto-paint";
     if (pause) {
       pause.disabled = !state.paintActive;
-      pause.textContent = state.paintPaused ? "Resume" : "Pause";
+      pause.innerHTML = icon(state.paintPaused ? "play" : "pause");
+      const pauseLabel = state.paintPaused ? "Resume auto-paint" : "Pause auto-paint";
+      pause.setAttribute("aria-label", pauseLabel);
+      pause.title = pauseLabel;
     }
     if (stop) stop.disabled = !state.paintActive;
     if (interval) interval.checked = state.paintIntervalEnabled;
@@ -1789,7 +1880,7 @@ import {
     const visibility = document.getElementById(`${PANEL_ID}-visibility`);
     const title = document.getElementById(`${PANEL_ID}-title`);
     const size = document.getElementById(`${PANEL_ID}-size`);
-    const templateNote = document.getElementById(`${PANEL_ID}-template-note`);
+    const source = document.getElementById(`${PANEL_ID}-source`);
     const templateX = document.getElementById(`${PANEL_ID}-template-x`);
     const templateY = document.getElementById(`${PANEL_ID}-template-y`);
     const templateCenter = document.getElementById(`${PANEL_ID}-template-center`);
@@ -1807,15 +1898,30 @@ import {
       paintPath.disabled = state.paintActive;
     }
     if (preserveView) preserveView.checked = state.preserveView;
-    if (visibility) visibility.textContent = state.hidden ? "Show" : "Hide";
-    if (title) title.textContent = state.editorKind === "hq" ? "HQ reference" : "Reference";
-    if (size) size.textContent = editorKey();
-    if (templateNote) {
-      templateNote.textContent = state.editorKind === "profile"
-        ? "Raw PNG · any RGB"
-        : state.editorKind === "hq"
-        ? "Raw PNG · ≤ canvas"
-        : "Raw PNG · exact palette";
+    if (visibility) {
+      setButtonFace(
+        visibility,
+        state.hidden ? "visibilityOff" : "visibility",
+        state.hidden ? "Show" : "Hide",
+      );
+      visibility.disabled = !state.target;
+    }
+    if (title) title.textContent = state.editorKind === "hq" ? "HQ template" : "Template";
+    // Badge carries the fixed constraint (the canvas), the line below it carries
+    // what the user chose (the file), so the two facts stop reading as one.
+    if (size) size.textContent = `${state.width} × ${state.height}`;
+    if (source) {
+      if (state.target) {
+        source.textContent = state.editorKind === "hq"
+          ? `${state.sourceName} · ${state.templateWidth} × ${state.templateHeight}`
+          : state.sourceName;
+      } else {
+        source.textContent = state.editorKind === "profile"
+          ? "Load any 8-bit RGB PNG"
+          : state.editorKind === "hq"
+          ? "Load a PNG up to canvas size"
+          : "Load an exact-palette PNG";
+      }
     }
     const maxTemplateX = Math.max(0, state.width - state.templateWidth);
     const maxTemplateY = Math.max(0, state.height - state.templateHeight);
@@ -1834,8 +1940,12 @@ import {
       templateY.disabled = !state.target || state.paintActive;
     }
     if (templateCenter) templateCenter.disabled = !state.target || state.paintActive;
-    if (load) load.disabled = state.templateMoveActive;
-    if (clear) clear.disabled = state.templateMoveActive;
+    if (load) {
+      load.disabled = state.templateMoveActive;
+      // One focal point: Load leads until there is something to paint.
+      load.className = state.target ? "btn btn-sm gap-1" : "btn btn-primary btn-sm gap-1";
+    }
+    if (clear) clear.disabled = state.templateMoveActive || !state.target;
     if (templateMove) templateMove.disabled = !state.target
       || state.paintActive
       || state.hidden
@@ -1907,202 +2017,71 @@ import {
     style.id = `${SCRIPT_ID}-style`;
     style.textContent = `
       #${PANEL_ID} {
-        --waa-ink: CanvasText;
-        --waa-muted: color-mix(in srgb, CanvasText 62%, transparent);
-        --waa-faint: color-mix(in srgb, CanvasText 9%, Canvas);
-        --waa-border: color-mix(in srgb, CanvasText 14%, transparent);
-        --waa-accent: #1677ff;
         position: relative;
         z-index: 2;
-        flex: none;
-        width: 100%;
-        margin-top: 8px;
-        overflow: hidden;
-        border: 1px solid var(--waa-border);
-        border-radius: 12px;
-        background: color-mix(in srgb, Canvas 97%, CanvasText 3%);
-        color: var(--waa-ink);
         container-type: inline-size;
-        font: 12px/1.3 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        user-select: none;
       }
-      #${PANEL_ID}, #${PANEL_ID} * { box-sizing: border-box; }
-      #${PANEL_ID} .waa-head {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-height: 38px;
-        padding: 4px 6px 4px 10px;
-        border-bottom: 1px solid var(--waa-border);
+      #${PANEL_ID}[data-editor="profile"] {
+        margin-top: 0;
+        margin-bottom: 0.5rem;
       }
-      #${PANEL_ID} .waa-head strong { font-size: 13px; font-weight: 700; letter-spacing: -0.01em; }
-      #${PANEL_ID} .waa-size {
-        border-radius: 6px;
-        background: var(--waa-faint);
-        padding: 2px 6px;
-        color: var(--waa-muted);
-        font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-variant-numeric: tabular-nums;
-      }
-      #${PANEL_ID} .waa-head-hint {
-        flex: 1;
-        overflow: hidden;
-        color: var(--waa-muted);
-        text-align: right;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #${PANEL_ID} .waa-body {
-        display: grid;
-        grid-template-columns: minmax(190px, 0.9fr) minmax(240px, 1fr) minmax(330px, 1.25fr);
-      }
-      #${PANEL_ID}[data-collapsed="true"] .waa-body { display: none; }
-      #${PANEL_ID}[data-collapsed="true"] .waa-head { border-bottom: 0; }
-      #${PANEL_ID} .waa-group {
-        min-width: 0;
-        padding: 8px 10px;
-      }
-      #${PANEL_ID} .waa-group + .waa-group { border-left: 1px solid var(--waa-border); }
-      #${PANEL_ID} .waa-group-label {
-        margin-bottom: 6px;
-        color: var(--waa-muted);
-        font-size: 11px;
-        font-weight: 650;
-      }
-      #${PANEL_ID} .waa-row { display: flex; min-width: 0; align-items: center; gap: 6px; }
-      #${PANEL_ID} .waa-row + .waa-row { margin-top: 6px; }
-      #${PANEL_ID} .waa-paint-options { flex-wrap: wrap; }
-      #${PANEL_ID} .waa-row > label:first-child { color: var(--waa-muted); }
-      #${PANEL_ID} button, #${PANEL_ID} select, #${PANEL_ID} input[type="range"], #${PANEL_ID} input[type="number"] {
-        min-height: 30px;
-        border: 1px solid var(--waa-border);
-        border-radius: 7px;
-        background: var(--waa-faint);
-        color: inherit;
-        font: inherit;
-      }
-      #${PANEL_ID} button {
-        padding: 4px 9px;
-        cursor: pointer;
-        font-weight: 600;
-        white-space: nowrap;
-      }
-      #${PANEL_ID} button:hover { background: color-mix(in srgb, Canvas 83%, CanvasText 17%); }
-      #${PANEL_ID} button:active { transform: translateY(1px); }
-      #${PANEL_ID} button:focus-visible, #${PANEL_ID} select:focus-visible, #${PANEL_ID} input:focus-visible {
-        outline: 2px solid color-mix(in srgb, var(--waa-accent) 72%, transparent);
-        outline-offset: 2px;
-      }
-      #${PANEL_ID} button:disabled { cursor: default; opacity: 0.42; transform: none; }
-      #${PANEL_ID} input:disabled { cursor: default; opacity: 0.42; }
-      #${PANEL_ID} .waa-primary { background: var(--waa-accent); border-color: var(--waa-accent); color: #f8fbff; font-weight: 700; }
-      #${PANEL_ID} .waa-primary:hover { background: #0b66df; }
-      #${PANEL_ID} .waa-quiet { border-color: transparent; background: transparent; color: var(--waa-muted); }
-      #${PANEL_ID} input[type="number"] {
-        width: 58px;
-        padding: 3px 6px;
-        font-variant-numeric: tabular-nums;
-      }
-      #${PANEL_ID} select { max-width: 100%; padding: 3px 24px 3px 7px; }
-      #${PANEL_ID} input[type="range"] { flex: 1; min-width: 64px; accent-color: var(--waa-accent); }
-      #${PANEL_ID} .waa-check { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-      #${PANEL_ID} .waa-grow { flex: 1; }
-      #${PANEL_ID} .waa-note {
-        min-width: 0;
-        overflow: hidden;
-        color: var(--waa-muted);
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #${PANEL_ID} .waa-value {
-        min-width: 32px;
-        text-align: right;
-        font-variant-numeric: tabular-nums;
-      }
-      #${PANEL_ID} .waa-status {
-        grid-column: 1 / -1;
-        min-height: 28px;
-        padding: 6px 10px;
-        border-top: 1px solid var(--waa-border);
-        overflow: hidden;
-        color: var(--waa-muted);
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #${PANEL_ID} .waa-status[data-kind="warn"] { color: #d97706; }
+      #${PANEL_ID}[data-collapsed="true"] .waa-collapsible { display: none; }
+      #${PANEL_ID} .waa-groups { column-gap: 2rem; row-gap: 1rem; }
+      #${PANEL_ID} .waa-group { flex: 0 1 19rem; min-width: 13rem; }
+      #${PANEL_ID} .waa-group-wide { flex-basis: 24rem; }
+      #${PANEL_ID} .waa-range { max-width: 15rem; }
+      #${PANEL_ID} .waa-value { min-width: 2.75rem; text-align: right; }
+      #${PANEL_ID} .waa-select { width: auto; max-width: 100%; align-self: flex-start; }
+      #${PANEL_ID} .waa-number { width: 4.5rem; }
+      #${PANEL_ID} .waa-coord { width: 4.75rem; }
+      #${PANEL_ID} .waa-file { display: none; }
+      /* .waa-alliance: only the alliance artboard gets replaced mid-run.
+         .waa-paced: surfaces that dispatch through the paced loop.
+         .waa-palette: surfaces that paint from a Wplace palette. */
+      #${PANEL_ID}:not([data-editor="alliance"]) .waa-alliance { display: none; }
+      #${PANEL_ID}[data-editor="profile"] .waa-paced { display: none; }
+      #${PANEL_ID}[data-editor="profile"] .waa-palette { display: none; }
+      #${PANEL_ID}:not([data-editor="profile"]) .waa-profile { display: none; }
+      #${PANEL_ID} .waa-profile { flex-basis: 100%; }
+      #${PANEL_ID}:not([data-editor="hq"]) .waa-hq { display: none; }
+      #${PANEL_ID}[data-editor="hq"][data-hq-auto-paint="false"] .waa-paint { display: none; }
       #${PANEL_ID} .waa-progress {
-        grid-column: 1 / -1;
+        position: relative;
         height: 2px;
+        margin: 0.75rem -0.75rem 0;
         overflow: hidden;
-        background: transparent;
+      }
+      #${PANEL_ID} .waa-progress::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: currentColor;
+        opacity: 0.1;
       }
       #${PANEL_ID} .waa-progress > span {
-        display: block;
-        width: 100%;
-        height: 100%;
+        position: absolute;
+        inset: 0;
         transform: scaleX(0);
         transform-origin: left;
-        background: var(--waa-accent);
+        background: var(--color-primary, currentColor);
       }
-      #${PANEL_ID} .waa-icon { width: 32px; padding: 3px; font-size: 11px; }
-      #${PANEL_ID} .waa-file { display: none; }
-      #${PANEL_ID} .waa-profile-only { display: none; }
-      #${PANEL_ID} .waa-hq-only { display: none; }
-      #${PANEL_ID}[data-editor="hq"] .waa-hq-only { display: flex; }
-      #${PANEL_ID} .waa-position-label { color: var(--waa-muted); }
-      #${PANEL_ID}[data-editor="profile"] .waa-alliance-only { display: none; }
-      #${PANEL_ID}[data-editor="profile"] .waa-profile-only { display: inline; }
-      #${PANEL_ID}[data-editor="hq"][data-hq-auto-paint="false"] .waa-paint { display: none; }
-      @container (max-width: 780px) {
-        #${PANEL_ID} .waa-body { grid-template-columns: 1fr 1fr; }
-        #${PANEL_ID} .waa-paint { grid-column: 1 / -1; border-top: 1px solid var(--waa-border); border-left: 0 !important; }
+      @media (prefers-reduced-motion: no-preference) {
+        #${PANEL_ID} .waa-progress > span {
+          transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
       }
-      @container (max-width: 520px) {
-        #${PANEL_ID} .waa-head-hint { display: none; }
-        #${PANEL_ID} .waa-body { grid-template-columns: 1fr; }
-        #${PANEL_ID} .waa-group + .waa-group { border-top: 1px solid var(--waa-border); border-left: 0; }
-        #${PANEL_ID} .waa-paint { grid-column: auto; }
-        #${PANEL_ID} .waa-paint .waa-row { flex-wrap: wrap; }
-      }
-      @media (prefers-reduced-motion: reduce) {
-        #${PANEL_ID} .waa-progress > span { transition: none; }
+      @container (max-width: 34rem) {
+        #${PANEL_ID} .waa-group { flex-basis: 100%; }
+        #${PANEL_ID} .waa-group-wide { flex-basis: 100%; }
+        /* Truncation hides most of the message at phone width; let it wrap. */
+        #${PANEL_ID} .waa-status { overflow: visible; text-overflow: clip; white-space: normal; }
       }
       .${MOVE_TOOLBAR_CLASS} {
         position: fixed;
         z-index: 2147483646;
-        display: flex;
-        gap: 4px;
-        transform: translate(-50%, calc(-100% - 6px));
-        padding: 4px;
-        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
-        border-radius: 9px;
-        background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
-        box-shadow: 0 4px 14px color-mix(in srgb, CanvasText 18%, transparent);
-        color: CanvasText;
-        user-select: none;
+        transform: translate(-50%, calc(-100% - 0.5rem));
       }
       .${MOVE_TOOLBAR_CLASS}[hidden] { display: none; }
-      .${MOVE_TOOLBAR_CLASS} button {
-        width: 32px;
-        height: 32px;
-        padding: 0;
-        border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
-        border-radius: 6px;
-        background: color-mix(in srgb, Canvas 88%, CanvasText 12%);
-        color: inherit;
-        font: 700 16px/1 ui-sans-serif, system-ui, sans-serif;
-        cursor: pointer;
-      }
-      .${MOVE_TOOLBAR_CLASS} button[data-action="confirm"] {
-        border-color: #1677ff;
-        background: #1677ff;
-        color: #f8fbff;
-      }
-      .${MOVE_TOOLBAR_CLASS} button:hover { filter: brightness(0.94); }
-      .${MOVE_TOOLBAR_CLASS} button:focus-visible {
-        outline: 2px solid color-mix(in srgb, #1677ff 72%, transparent);
-        outline-offset: 2px;
-      }
     `;
     document.head.append(style);
   }
@@ -2112,98 +2091,132 @@ import {
     const panel = document.createElement("section");
     panel.id = PANEL_ID;
     panel.dataset.collapsed = String(state.collapsed);
+    panel.dataset.collapsed = String(state.collapsed);
     panel.dataset.editor = state.editorKind;
     panel.dataset.hqAutoPaint = String(ENABLE_HQ_AUTO_PAINT);
     panel.dataset.version = SCRIPT_VERSION;
+    panel.className = "border-base-200 bg-base-100 mt-3 shrink-0 rounded-2xl border p-3";
     panel.innerHTML = `
-      <div class="waa-head">
-        <strong id="${PANEL_ID}-title">Reference</strong>
-        <span class="waa-size" id="${PANEL_ID}-size">${editorKey()}</span>
-        <span class="waa-head-hint">Middle-click template → pick color</span>
-        <button class="waa-icon waa-quiet" id="${PANEL_ID}-collapse" type="button" aria-expanded="true" aria-label="Collapse reference controls" title="Collapse reference controls">▴</button>
+      <div class="waa-head flex flex-wrap items-center gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <p class="truncate text-sm font-semibold" id="${PANEL_ID}-title">Template</p>
+            <span class="badge badge-sm shrink-0 tabular-nums" id="${PANEL_ID}-size"></span>
+          </div>
+          <p class="text-base-content/85 truncate text-xs" id="${PANEL_ID}-source"></p>
+        </div>
+        <div class="flex items-center gap-1">
+          <button class="btn btn-sm gap-1" id="${PANEL_ID}-load" type="button">
+            ${icon("upload")}<span>Load PNG</span>
+          </button>
+          <input class="waa-file" id="${PANEL_ID}-file" type="file" accept="image/png" tabindex="-1" aria-hidden="true">
+          <button class="btn btn-ghost btn-sm btn-circle" id="${PANEL_ID}-clear" type="button" aria-label="Remove template">
+            ${icon("delete")}
+          </button>
+          <button class="btn btn-ghost btn-sm btn-circle" id="${PANEL_ID}-collapse" type="button" aria-expanded="true" aria-label="Collapse template controls">
+            ${icon("expandLess")}
+          </button>
+        </div>
       </div>
-      <div class="waa-body">
-        <section class="waa-group">
-          <div class="waa-group-label">Template</div>
-          <div class="waa-row">
-            <button class="waa-primary" id="${PANEL_ID}-load" type="button">Load PNG</button>
-            <input class="waa-file" id="${PANEL_ID}-file" type="file" accept="image/png">
-            <span class="waa-note waa-grow" id="${PANEL_ID}-template-note">Raw PNG · exact palette</span>
-            <button class="waa-quiet" id="${PANEL_ID}-clear" type="button">Clear</button>
-          </div>
-          <div class="waa-row waa-hq-only">
-            <span class="waa-position-label">Top-left</span>
-            <label for="${PANEL_ID}-template-x">X</label>
-            <input id="${PANEL_ID}-template-x" aria-label="Template X coordinate" type="number" min="0" step="1" value="0">
-            <label for="${PANEL_ID}-template-y">Y</label>
-            <input id="${PANEL_ID}-template-y" aria-label="Template Y coordinate" type="number" min="0" step="1" value="0">
-          </div>
-          <div class="waa-row waa-hq-only">
-            <button class="waa-grow" id="${PANEL_ID}-template-move" type="button" aria-pressed="false">Move template</button>
-            <button class="waa-quiet" id="${PANEL_ID}-template-center" type="button">Center</button>
-          </div>
-        </section>
-        <section class="waa-group">
-          <div class="waa-group-label">Overlay</div>
-          <div class="waa-row">
-            <label for="${PANEL_ID}-opacity">Opacity</label>
-            <input id="${PANEL_ID}-opacity" type="range" min="5" max="100" step="5" value="55">
-            <span class="waa-value" id="${PANEL_ID}-opacity-value">55%</span>
-            <button id="${PANEL_ID}-visibility" type="button">Hide</button>
-          </div>
-          <div class="waa-row">
-            <label for="${PANEL_ID}-display-mode">Display</label>
-            <select id="${PANEL_ID}-display-mode" title="Choose how much of each template pixel is shown">
-              <option value="full">Full pixel</option>
-              <option value="center">Center ⅓</option>
-            </select>
-            <label class="waa-check waa-grow" title="Hide target pixels that already match the editor canvas">
-              <input id="${PANEL_ID}-mismatch" type="checkbox"> Only differences
+
+      <div class="waa-collapsible">
+        <div class="waa-groups mt-3 flex flex-wrap">
+          <section class="waa-hq waa-group flex flex-col gap-2">
+            <span class="text-base-content/85 text-[11px] font-medium tracking-wide uppercase">Position</span>
+            <div class="flex items-center gap-1.5">
+              <label class="text-base-content/85 text-xs" for="${PANEL_ID}-template-x">X</label>
+              <input class="input input-xs waa-coord tabular-nums" id="${PANEL_ID}-template-x" type="number" min="0" step="1" value="0" aria-label="Template X coordinate">
+              <label class="text-base-content/85 text-xs" for="${PANEL_ID}-template-y">Y</label>
+              <input class="input input-xs waa-coord tabular-nums" id="${PANEL_ID}-template-y" type="number" min="0" step="1" value="0" aria-label="Template Y coordinate">
+            </div>
+            <div class="flex items-center gap-1">
+              <button class="btn btn-sm gap-1" id="${PANEL_ID}-template-move" type="button" aria-pressed="false">
+                ${icon("openWith")}<span>Move</span>
+              </button>
+              <button class="btn btn-ghost btn-sm gap-1" id="${PANEL_ID}-template-center" type="button">
+                ${icon("center")}<span>Center</span>
+              </button>
+            </div>
+          </section>
+
+          <section class="waa-group flex flex-col gap-2">
+            <span class="text-base-content/85 text-[11px] font-medium tracking-wide uppercase">Overlay</span>
+            <div class="flex items-center gap-2">
+              <input class="waa-range range range-xs range-primary min-w-0 flex-1" id="${PANEL_ID}-opacity" type="range" min="5" max="100" step="5" value="55" aria-label="Overlay opacity">
+              <span class="waa-value text-base-content/85 text-xs tabular-nums" id="${PANEL_ID}-opacity-value">55%</span>
+              <button class="btn btn-ghost btn-xs gap-1" id="${PANEL_ID}-visibility" type="button">
+                ${icon("visibility")}<span>Hide</span>
+              </button>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <select class="select select-xs waa-select" id="${PANEL_ID}-display-mode" aria-label="Template pixel size" title="How much of each template pixel is drawn">
+                <option value="full">Full pixel</option>
+                <option value="center">Center third</option>
+              </select>
+              <label class="flex cursor-pointer items-center gap-1.5" title="Hide template pixels that already match the editor canvas">
+                <input class="toggle toggle-xs" id="${PANEL_ID}-mismatch" type="checkbox">
+                <span class="text-base-content/85 text-xs">Only differences</span>
+              </label>
+            </div>
+            <label class="waa-alliance flex cursor-pointer items-center gap-1.5" title="Restore zoom and canvas position when Wplace replaces the artboard">
+              <input class="toggle toggle-xs" id="${PANEL_ID}-preserve-view" type="checkbox">
+              <span class="text-base-content/85 text-xs">Keep zoom and position</span>
             </label>
-            <button class="waa-quiet" id="${PANEL_ID}-refresh" type="button">Refresh</button>
-          </div>
-        </section>
-        <section class="waa-group waa-paint">
-          <div class="waa-group-label" id="${PANEL_ID}-paint-label">Paint queue</div>
-          <div class="waa-row">
-            <label class="waa-check waa-alliance-only" title="Add a delay after every dispatched paint event">
-              <input id="${PANEL_ID}-paint-interval" type="checkbox" checked> Interval
-            </label>
-            <input class="waa-alliance-only" id="${PANEL_ID}-paint-delay" aria-label="Auto-paint interval in milliseconds" type="number" min="1" max="5000" step="1" value="150">
-            <span class="waa-note waa-alliance-only">ms</span>
-            <span class="waa-grow waa-alliance-only"></span>
-            <span class="waa-note waa-grow waa-profile-only">Local draft · Wplace Save submits</span>
-            <button class="waa-primary" id="${PANEL_ID}-paint-start" type="button">Auto-paint</button>
-            <button class="waa-alliance-only" id="${PANEL_ID}-paint-pause" type="button" disabled>Pause</button>
-            <button class="waa-quiet waa-alliance-only" id="${PANEL_ID}-paint-stop" type="button" disabled>Stop</button>
-          </div>
-          <div class="waa-row waa-alliance-only">
-            <label for="${PANEL_ID}-paint-path">Path</label>
-            <select id="${PANEL_ID}-paint-path" title="Choose the spatial order used within each color">
-              <option value="start-end">Start → end</option>
-              <option value="end-start">End → start</option>
-              <option value="middle-out">Middle → out</option>
-              <option value="edge-in">Edge → in</option>
-              <option value="zigzag">Zigzag</option>
-              <option value="hilbert">Hilbert curve</option>
-            </select>
-            <span class="waa-note waa-grow">within each color</span>
-          </div>
-          <div class="waa-row waa-paint-options">
-            <label class="waa-check" title="Never overwrite a non-transparent editor pixel">
-              <input id="${PANEL_ID}-only-unpainted" type="checkbox"> Only unpainted pixels
-            </label>
-            <label class="waa-check waa-alliance-only" title="Paint only template pixels matching the Wplace color selected when auto-paint starts">
-              <input id="${PANEL_ID}-selected-color-only" type="checkbox"> Only selected color
-            </label>
-            <span class="waa-grow waa-alliance-only"></span>
-            <label class="waa-check waa-alliance-only" title="Restore zoom and canvas position when Wplace replaces the artboard">
-              <input id="${PANEL_ID}-preserve-view" type="checkbox"> Keep view on refresh
-            </label>
-          </div>
-        </section>
-        <div class="waa-status" id="${PANEL_ID}-status">Load an image to begin.</div>
+          </section>
+
+          <section class="waa-paint waa-group waa-group-wide flex flex-col gap-2">
+            <span class="text-base-content/85 text-[11px] font-medium tracking-wide uppercase" id="${PANEL_ID}-paint-label">Auto-paint</span>
+            <div class="flex items-center gap-1">
+              <button class="btn btn-primary btn-sm gap-1" id="${PANEL_ID}-paint-start" type="button">
+                ${icon("play")}<span>Auto-paint</span>
+              </button>
+              <button class="waa-paced btn btn-soft btn-sm btn-square" id="${PANEL_ID}-paint-pause" type="button" aria-label="Pause auto-paint" disabled>
+                ${icon("pause")}
+              </button>
+              <button class="waa-paced btn btn-soft btn-sm btn-square" id="${PANEL_ID}-paint-stop" type="button" aria-label="Stop auto-paint" disabled>
+                ${icon("stop")}
+              </button>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <select class="select select-xs waa-select" id="${PANEL_ID}-paint-path" aria-label="Paint order" title="Spatial order used within each color">
+                <option value="start-end">Start &rarr; end</option>
+                <option value="end-start">End &rarr; start</option>
+                <option value="middle-out">Middle &rarr; out</option>
+                <option value="edge-in">Edge &rarr; in</option>
+                <option value="zigzag">Zigzag</option>
+                <option value="hilbert">Hilbert curve</option>
+              </select>
+              <div class="waa-paced flex items-center gap-1.5">
+                <label class="flex cursor-pointer items-center gap-1.5" title="Wait between dispatched paint events">
+                  <input class="toggle toggle-xs" id="${PANEL_ID}-paint-interval" type="checkbox" checked>
+                  <span class="text-base-content/85 text-xs">Delay</span>
+                </label>
+                <input class="input input-xs waa-number tabular-nums" id="${PANEL_ID}-paint-delay" type="number" min="1" max="5000" step="1" value="150" aria-label="Delay between paint events in milliseconds">
+                <span class="text-base-content/85 text-xs">ms</span>
+              </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <label class="flex cursor-pointer items-center gap-1.5" title="Never overwrite a pixel that already has a color">
+                <input class="toggle toggle-xs" id="${PANEL_ID}-only-unpainted" type="checkbox">
+                <span class="text-base-content/85 text-xs">Keep existing pixels</span>
+              </label>
+              <label class="waa-palette flex cursor-pointer items-center gap-1.5" title="Paint only template pixels matching the Wplace color selected when auto-paint starts">
+                <input class="toggle toggle-xs" id="${PANEL_ID}-selected-color-only" type="checkbox">
+                <span class="text-base-content/85 text-xs">Only selected color</span>
+              </label>
+              <span class="waa-profile text-base-content/85 text-xs">Wplace&rsquo;s Save submits the draft</span>
+            </div>
+          </section>
+        </div>
+
         <div class="waa-progress" aria-hidden="true"><span id="${PANEL_ID}-progress"></span></div>
+        <div class="flex items-center gap-2 pt-2">
+          <span class="text-base-content/70 shrink-0" id="${PANEL_ID}-status-icon">${icon("info")}</span>
+          <p class="waa-status text-base-content min-w-0 flex-1 truncate text-xs" id="${PANEL_ID}-status" role="status" aria-live="polite"></p>
+          <button class="btn btn-ghost btn-xs gap-1 shrink-0" id="${PANEL_ID}-refresh" type="button" title="Re-read Wplace's canvas and redraw the overlay">
+            ${icon("refresh", "size-3.5")}<span>Refresh</span>
+          </button>
+        </div>
       </div>
     `;
 
@@ -2322,17 +2335,25 @@ import {
     panel.querySelector(`#${PANEL_ID}-paint-stop`).addEventListener("click", () => stopAutoFill());
     panel.querySelector(`#${PANEL_ID}-collapse`).addEventListener("click", () => {
       state.collapsed = !state.collapsed;
-      panel.dataset.collapsed = String(state.collapsed);
-      const collapse = panel.querySelector(`#${PANEL_ID}-collapse`);
-      collapse.textContent = state.collapsed ? "▾" : "▴";
-      collapse.setAttribute("aria-expanded", String(!state.collapsed));
-      collapse.setAttribute("aria-label", state.collapsed ? "Expand reference controls" : "Collapse reference controls");
-      collapse.title = collapse.getAttribute("aria-label");
+      persistSettings();
+      syncCollapse(panel);
     });
 
+    // Above the editor on every surface, between Wplace's header and its canvas.
     root.before(panel);
+    syncCollapse(panel);
     syncControls();
     setStatus(state.statusMessage, state.statusKind);
+  }
+
+  function syncCollapse(panel) {
+    const collapse = panel.querySelector(`#${PANEL_ID}-collapse`);
+    const label = state.collapsed ? "Expand template controls" : "Collapse template controls";
+    panel.dataset.collapsed = String(state.collapsed);
+    collapse.innerHTML = icon(state.collapsed ? "expandMore" : "expandLess");
+    collapse.setAttribute("aria-expanded", String(!state.collapsed));
+    collapse.setAttribute("aria-label", label);
+    collapse.title = label;
   }
 
   async function attach(editor) {
