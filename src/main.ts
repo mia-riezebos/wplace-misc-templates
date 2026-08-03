@@ -10,6 +10,10 @@ import {
   ALLIANCE_EDITOR_RECYCLE_EVENTS,
   shouldRecycleAllianceEditor,
 } from "./core/paint-session.ts";
+import {
+  editorInputKind,
+  isWplacePaintButtonLabel,
+} from "./core/editor-session.ts";
 import { shouldRefreshMismatchOverlay } from "./core/paint-feedback.ts";
 import {
   resolveEditorColor,
@@ -24,11 +28,11 @@ import {
 
   /*
    * Safety boundary:
-   * - no fetch/XHR/WebSocket calls or direct backend access
    * - HQ auto-paint is build-time opt-in; edit ENABLE_HQ_AUTO_PAINT before installation
    * - alliance auto-paint is exposed for the 64x64 / 384x128 asset canvas
    * - instant fill is only exposed for the local 16x16 user profile-picture draft
-   * - both modes use visible editor controls; this script never clicks Save/Submit
+   * - paint events and submissions go through Wplace's visible editor controls
+   * - the HQ metadata endpoint is read once at start to respect its hidden charge limit
    */
 
   const SCRIPT_VERSION = __WAA_VERSION__;
@@ -48,7 +52,8 @@ import {
   const SYNTHETIC_POINTER_ID = 9471;
   const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
   const ALLIANCE_REFRESH_GRACE_MS = 15000;
-  const ALLIANCE_NATURAL_REFRESH_WAIT_MS = 7000;
+  const EDITOR_SESSION_WAIT_MS = 15000;
+  const HQ_METADATA_URL = "https://backend.wplace.live/alliance/headquarters";
   const UNPACED_BATCH_SIZE = 50;
 
   /*
@@ -1280,26 +1285,75 @@ import {
     return true;
   }
 
-  function ensurePaintTool() {
-    if (state.editorKind === "profile") return true;
-    const container = state.root?.closest('[role="dialog"], dialog');
-    if (!container) return false;
-    const paintButton = [...container.querySelectorAll("button")].find((button) => (
-      button.textContent.trim() === "Paint" && button.offsetParent !== null
-    ));
-    if (!paintButton) return false;
-    paintButton.click();
-    return true;
+  function editorDialog() {
+    return state.root?.closest('[role="dialog"], dialog') || null;
   }
 
-  function readHqCharges() {
+  function visibleButton(button) {
+    return button.getClientRects().length > 0 && button.offsetParent !== null;
+  }
+
+  function paintSessionActive() {
+    const container = editorDialog();
+    if (!container || state.editorKind === "profile") return false;
+    return [...container.querySelectorAll('button[aria-label="Color Picker"]')]
+      .some(visibleButton);
+  }
+
+  function wplacePaintButtons(enabledOnly = true) {
+    const container = editorDialog();
+    if (!container) return [];
+    return [...container.querySelectorAll("button")].filter((button) => (
+      (!enabledOnly || !button.disabled)
+      && visibleButton(button)
+      && !button.closest(`#${PANEL_ID}`)
+      && isWplacePaintButtonLabel(button.textContent)
+    ));
+  }
+
+  async function waitForPaintSession(active, runId = null) {
+    const deadline = Date.now() + EDITOR_SESSION_WAIT_MS;
+    while ((runId === null || runId === state.paintRunId) && Date.now() < deadline) {
+      if (paintSessionActive() === active) return true;
+      await wait(25);
+    }
+    return false;
+  }
+
+  async function ensurePaintTool(runId = null) {
+    if (state.editorKind === "profile") return true;
+    if (paintSessionActive()) return true;
+    const rootPaintButtons = [...state.root.querySelectorAll("button")].filter((button) => (
+      !button.disabled && visibleButton(button) && isWplacePaintButtonLabel(button.textContent)
+    ));
+    const paintButtons = rootPaintButtons.length ? rootPaintButtons : wplacePaintButtons();
+    if (paintButtons.length !== 1) return false;
+    paintButtons[0].click();
+    return waitForPaintSession(true, runId);
+  }
+
+  async function commitPaintSession(runId) {
+    if (state.editorKind === "profile" || !paintSessionActive()) return true;
+    const paintButtons = wplacePaintButtons();
+    if (paintButtons.length !== 1) return false;
+    paintButtons[0].click();
+    return waitForPaintSession(false, runId);
+  }
+
+  async function readHqCharges() {
     if (state.editorKind !== "hq") return null;
-    const match = state.root?.textContent.match(/\b([\d,]+)\s*\/\s*([\d,]+)\b/);
-    if (!match) return null;
-    return {
-      current: Number(match[1].replaceAll(",", "")),
-      maximum: Number(match[2].replaceAll(",", "")),
-    };
+    try {
+      const response = await fetch(HQ_METADATA_URL, { credentials: "include" });
+      if (!response.ok) return null;
+      const metadata = await response.json();
+      const current = Number(metadata.charges);
+      const maximum = Number(metadata.maxCharges);
+      if (!Number.isFinite(current) || !Number.isFinite(maximum)) return null;
+      return { current: Math.max(0, Math.floor(current)), maximum };
+    } catch (error) {
+      console.warn(`${SCRIPT_ID}: could not read HQ charges`, error);
+      return null;
+    }
   }
 
   function editorPixelFromClient(clientX, clientY) {
@@ -1517,30 +1571,6 @@ import {
     return false;
   }
 
-  async function recycleAllianceEditor(runId) {
-    const burstRoot = state.root;
-    if (!burstRoot?.isConnected || !burstRoot.closest("dialog")) return false;
-
-    setStatus(
-      `Painted ${ALLIANCE_EDITOR_RECYCLE_EVENTS.toLocaleString()} pixels; `
-      + "waiting for Wplace's idle refresh…",
-    );
-    const deadline = Date.now() + ALLIANCE_NATURAL_REFRESH_WAIT_MS;
-    while (runId === state.paintRunId && Date.now() < deadline) {
-      queueScan();
-      await wait(50);
-      if (
-        state.root !== burstRoot
-        && state.root?.isConnected
-        && state.baseCanvas?.isConnected
-        && state.editorKind === "alliance"
-      ) {
-        return reopenAllianceEditorAfterRefresh(runId, state.root);
-      }
-    }
-    return false;
-  }
-
   function withSyntheticPointerCapture(root, callback) {
     const originalDescriptor = root
       ? Object.getOwnPropertyDescriptor(root, "setPointerCapture")
@@ -1576,22 +1606,31 @@ import {
     if (!rect?.width || !rect.height || !target) return false;
     const clientX = rect.left + ((item.x + 0.5) / state.width) * rect.width;
     const clientY = rect.top + ((item.y + 0.5) / state.height) * rect.height;
-    const common = {
+    const mouse = {
       bubbles: true,
       cancelable: true,
       composed: true,
       clientX,
       clientY,
-      pointerId: SYNTHETIC_POINTER_ID,
-      pointerType: "mouse",
-      isPrimary: true,
       button: 0,
     };
 
+    if (editorInputKind(state.editorKind) === "profile") {
+      target.dispatchEvent(new MouseEvent("click", { ...mouse, buttons: 0 }));
+      return true;
+    }
+
+    const pointer = {
+      ...mouse,
+      pointerId: SYNTHETIC_POINTER_ID,
+      pointerType: "mouse",
+      isPrimary: true,
+    };
+
     return withSyntheticPointerCapture(state.root, () => {
-      target.dispatchEvent(new PointerEvent("pointermove", { ...common, buttons: 0 }));
-      target.dispatchEvent(new PointerEvent("pointerdown", { ...common, buttons: 1 }));
-      target.dispatchEvent(new PointerEvent("pointerup", { ...common, buttons: 0 }));
+      target.dispatchEvent(new PointerEvent("pointermove", { ...pointer, buttons: 0 }));
+      target.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
+      target.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 }));
       return true;
     });
   }
@@ -1609,10 +1648,6 @@ import {
     for (const item of items) {
       if (runId !== state.paintRunId) return { ok: true, dispatched, stopped: true };
       if (state.editorKind === "hq") {
-        const liveCharges = readHqCharges()?.current;
-        if (Number.isFinite(liveCharges)) {
-          state.hqChargesRemaining = Math.min(state.hqChargesRemaining, liveCharges);
-        }
         if (!state.hqChargesRemaining || state.hqChargesRemaining <= 0) {
           return { ok: true, dispatched, outOfCharges: true };
         }
@@ -1679,8 +1714,22 @@ import {
     if (message) setStatus(message);
   }
 
+  async function stopAndCommitAutoFill() {
+    if (!state.paintActive) return;
+    const runId = state.paintRunId;
+    state.paintPaused = true;
+    syncPaintControls();
+    const committed = await commitPaintSession(runId);
+    if (runId !== state.paintRunId) return;
+    stopAutoFill(
+      committed
+        ? "Auto-paint stopped; pending Wplace pixels were submitted."
+        : "Auto-paint stopped, but Wplace's pending paint session could not be submitted.",
+    );
+  }
+
   async function startProfileFill(queue) {
-    if (!ensurePaintTool()) {
+    if (!await ensurePaintTool()) {
       setStatus("Could not activate Wplace's profile-picture Paint tool.", "warn");
       return;
     }
@@ -1761,12 +1810,16 @@ import {
       return;
     }
 
-    const hqCharges = isHq ? readHqCharges() : null;
+    const hqCharges = isHq ? await readHqCharges() : null;
     if (isHq && (!hqCharges || hqCharges.current <= 0)) {
       setStatus(
         hqCharges ? "HQ charges are empty; auto-paint did not start." : "Could not read the HQ charge counter.",
         "warn",
       );
+      return;
+    }
+    if (!isProfile && !await ensurePaintTool()) {
+      setStatus(`Could not activate Wplace's ${isHq ? "HQ" : "alliance"} Paint tool.`, "warn");
       return;
     }
     const paletteEditor = isAlliance || isHq;
@@ -1790,10 +1843,6 @@ import {
     }
     if (isProfile) {
       await startProfileFill(queue);
-      return;
-    }
-    if (!ensurePaintTool()) {
-      setStatus(`Could not activate Wplace's ${isHq ? "HQ" : "alliance"} Paint tool.`, "warn");
       return;
     }
 
@@ -1856,6 +1905,14 @@ import {
         state.paintIndex += result.dispatched;
       }
       if (result.outOfCharges) {
+        const committed = await commitPaintSession(runId);
+        if (runId !== state.paintRunId) return;
+        if (!committed) {
+          state.paintPaused = true;
+          syncPaintControls();
+          setStatus("Could not submit Wplace's pending HQ paint session. Paused; use Resume to retry.", "warn");
+          continue;
+        }
         stopAutoFill("HQ charges exhausted; auto-paint stopped.");
         return;
       }
@@ -1883,23 +1940,45 @@ import {
         intervalEnabled: state.paintIntervalEnabled,
         queueRemaining: state.paintQueue.length - state.paintIndex,
       })) {
-        const recycled = await recycleAllianceEditor(runId);
+        setStatus(
+          `Painted ${ALLIANCE_EDITOR_RECYCLE_EVENTS.toLocaleString()} pixels; `
+          + "submitting this Wplace paint session…",
+        );
+        const committed = await commitPaintSession(runId);
         if (runId !== state.paintRunId) return;
-        if (!recycled) {
+        if (!committed) {
           state.paintPaused = true;
           syncPaintControls();
           setStatus(
-            "Wplace did not refresh and reopen the editor. Paused; use Resume to retry.",
+            "Could not submit Wplace's pending paint session. Paused; use Resume to retry.",
             "warn",
           );
           continue;
         }
+        setStatus("Wplace session submitted; opening a fresh paint session…");
+        const reopened = await ensurePaintTool(runId);
+        if (runId !== state.paintRunId) return;
+        if (!reopened) {
+          state.paintPaused = true;
+          syncPaintControls();
+          setStatus("Could not open a fresh Wplace paint session. Paused; use Resume to retry.", "warn");
+          continue;
+        }
         dispatchedSinceRecycle = 0;
+        state.paintColor = null;
         paintEditorRoot = state.root;
       }
     }
 
     if (runId === state.paintRunId) {
+      const committed = await commitPaintSession(runId);
+      if (runId !== state.paintRunId) return;
+      if (!committed) {
+        state.paintPaused = true;
+        syncPaintControls();
+        setStatus("Could not submit Wplace's pending paint session. Paused; use Resume to retry.", "warn");
+        return;
+      }
       state.paintActive = false;
       state.paintPaused = false;
       state.paintColor = null;
@@ -2376,7 +2455,9 @@ import {
       syncPaintControls();
       setStatus(state.paintPaused ? "Auto-paint paused." : "Auto-paint resumed.");
     });
-    panel.querySelector(`#${PANEL_ID}-paint-stop`).addEventListener("click", () => stopAutoFill());
+    panel.querySelector(`#${PANEL_ID}-paint-stop`).addEventListener("click", () => {
+      void stopAndCommitAutoFill();
+    });
     panel.querySelector(`#${PANEL_ID}-collapse`).addEventListener("click", () => {
       state.collapsed = !state.collapsed;
       persistSettings();
