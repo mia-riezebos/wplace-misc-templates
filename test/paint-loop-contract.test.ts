@@ -21,11 +21,11 @@ test("auto-paint starts without a confirmation dialog", () => {
   assert.doesNotMatch(autoPaintLoop, /window\.confirm/);
 });
 
-test("unpaced auto-paint recycles after 7,000 events and reopens the draft", () => {
-  assert.match(source, /ALLIANCE_NATURAL_REFRESH_WAIT_MS = 7000/);
+test("unpaced auto-paint commits and reopens its Wplace session after 7,000 events", () => {
   assert.match(autoPaintLoop, /shouldRecycleAllianceEditor\(\{/);
   assert.match(autoPaintLoop, /dispatchedSinceRecycle \+= result\.dispatched/);
-  assert.match(autoPaintLoop, /recycleAllianceEditor\(runId\)/);
+  assert.match(autoPaintLoop, /commitPaintSession\(runId\)/);
+  assert.match(autoPaintLoop, /ensurePaintTool\(runId\)/);
   assert.match(autoPaintLoop, /let paintEditorRoot = state\.root/);
   assert.match(autoPaintLoop, /state\.root !== paintEditorRoot/);
   assert.match(autoPaintLoop, /reopenAllianceEditorAfterRefresh\(runId, state\.root\)/);
@@ -45,4 +45,29 @@ test("unpaced auto-paint recycles after 7,000 events and reopens the draft", () 
   assert.notEqual(staleRunCheck, -1);
   assert.notEqual(paintDispatch, -1);
   assert.ok(staleRunCheck < paintDispatch);
+});
+
+test("alliance and HQ auto-paint commit Wplace's pending session before completing", () => {
+  assert.match(autoPaintLoop, /await commitPaintSession\(runId\)/);
+  assert.match(source, /function paintSessionActive\(\)/);
+  assert.match(source, /async function commitPaintSession\(runId\)/);
+});
+
+test("profile draft fill dispatches the click event Wplace now listens for", () => {
+  assert.match(source, /editorInputKind\(state\.editorKind\) === "profile"/);
+  assert.match(source, /new MouseEvent\("click"/);
+});
+
+test("selected-color auto-paint opens Wplace's new session before reading its swatch", () => {
+  const sessionStart = autoPaintLoop.indexOf("!isProfile && !await ensurePaintTool()");
+  const selectedColorRead = autoPaintLoop.indexOf("readSelectedPaletteColor(state.root)");
+  assert.notEqual(sessionStart, -1);
+  assert.notEqual(selectedColorRead, -1);
+  assert.ok(sessionStart < selectedColorRead);
+});
+
+test("stopping auto-paint submits pixels already pending in Wplace's session", () => {
+  assert.match(source, /async function stopAndCommitAutoFill\(\)/);
+  assert.match(source, /const committed = await commitPaintSession\(runId\)/);
+  assert.match(source, /void stopAndCommitAutoFill\(\)/);
 });

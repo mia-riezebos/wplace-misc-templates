@@ -59,9 +59,11 @@ test("HQ difference checks compose readable 64-pixel tiles", () => {
   assert.match(source, /context\.drawImage\(tile, x, y, tile\.width, tile\.height\)/);
 });
 
-test("opt-in HQ auto-paint uses one-event batches and stops at zero charges", () => {
-  assert.match(source, /function readHqCharges\(\)/);
+test("opt-in HQ auto-paint reads the current API charge state, commits, and stops at zero", () => {
+  assert.match(source, /async function readHqCharges\(\)/);
+  assert.match(source, /https:\/\/backend\.wplace\.live\/alliance\/headquarters/);
   assert.match(source, /state\.paintIntervalEnabled \|\| isHq \? 1 : UNPACED_BATCH_SIZE/);
   assert.match(source, /state\.hqChargesRemaining -= 1/);
+  assert.match(source, /await commitPaintSession\(runId\)/);
   assert.match(source, /result\.outOfCharges[\s\S]*HQ charges exhausted; auto-paint stopped/);
 });
