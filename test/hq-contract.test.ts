@@ -12,6 +12,13 @@ test("HQ overlays detect the tiled artboard and keep auto-paint hidden by defaul
   assert.match(source, /panel\.dataset\.hqAutoPaint = String\(ENABLE_HQ_AUTO_PAINT\)/);
 });
 
+test("fullscreen editors use the compact floating template panel", () => {
+  assert.match(source, /panel\.dataset\.fullscreen = String\(editorFullscreen\(root\)\)/);
+  assert.match(source, /\[data-fullscreen="true"\] \{/);
+  assert.match(source, /position: fixed;/);
+  assert.match(source, /max-height: calc\(100dvh - 6rem\);/);
+});
+
 test("HQ templates may be smaller, are positioned without resizing, and persist outside localStorage", () => {
   assert.match(source, /state\.editorKind === "hq"[\s\S]*decodePngSamples/);
   assert.match(source, /header\.width <= expectedWidth && header\.height <= expectedHeight/);
@@ -65,5 +72,27 @@ test("opt-in HQ auto-paint reads the current API charge state, commits, and stop
   assert.match(source, /state\.paintIntervalEnabled \|\| isHq \? 1 : UNPACED_BATCH_SIZE/);
   assert.match(source, /state\.hqChargesRemaining -= 1/);
   assert.match(source, /await commitPaintSession\(runId\)/);
-  assert.match(source, /result\.outOfCharges[\s\S]*HQ charges exhausted; auto-paint stopped/);
+  assert.match(source, /await refreshHqChargeBudget\(runId\)/);
+  assert.match(source, /const hadPendingPixels = paintSessionHasPendingPixels\(\)/);
+  assert.match(source, /hadPendingPixels[\s\S]*resolveHqChargeCheckpoint/);
+  assert.match(source, /state\.hqChargesRemaining = checkpoint\.nextDispatchBudget/);
+  assert.match(source, /if \(checkpoint\.exhausted\)/);
+});
+
+test("HQ auto-paint waits for Wplace's rendered tile pixels before its initial queue scan", () => {
+  const settle = source.indexOf("await waitForHqTilesToSettle(hqTilesBeforePaint)");
+  const queue = source.indexOf("const queue = buildPaintQueue(lockedColor)");
+
+  assert.notEqual(settle, -1);
+  assert.notEqual(queue, -1);
+  assert.ok(settle < queue);
+  assert.match(source, /waitForStableTileSnapshot\(\{/);
+  assert.match(source, /requiredChangeFrom: hqTilesBeforePaint/);
+  assert.match(source, /getImageData\(0, 0, canvas\.width, canvas\.height\)/);
+});
+
+test("HQ paint dispatch mirrors Wplace's stage transform and verifies the round trip", () => {
+  assert.match(source, /hqClientPoint\(/);
+  assert.match(source, /hqPixelFromClient\(/);
+  assert.match(source, /resolved\.x !== item\.x \|\| resolved\.y !== item\.y/);
 });

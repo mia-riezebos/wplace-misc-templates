@@ -55,7 +55,14 @@ test("alliance and HQ auto-paint commit Wplace's pending session before completi
 
 test("profile draft fill dispatches the click event Wplace now listens for", () => {
   assert.match(source, /editorInputKind\(state\.editorKind\) === "profile"/);
-  assert.match(source, /new MouseEvent\("click"/);
+  assert.match(source, /new pageWindow\.MouseEvent\("click"/);
+});
+
+test("canvas auto-paint bridges synthetic pointer capture in Wplace's page realm", () => {
+  assert.match(source, /function installSyntheticPointerCaptureBridge\(\)/);
+  assert.match(source, /pageWindow\.Element\?\.prototype/);
+  assert.match(source, /new pageWindow\.PointerEvent\("pointerdown"/);
+  assert.match(source, /installSyntheticPointerCaptureBridge\(\)/);
 });
 
 test("selected-color auto-paint opens Wplace's new session before reading its swatch", () => {
@@ -64,6 +71,15 @@ test("selected-color auto-paint opens Wplace's new session before reading its sw
   assert.notEqual(sessionStart, -1);
   assert.notEqual(selectedColorRead, -1);
   assert.ok(sessionStart < selectedColorRead);
+});
+
+test("new Wplace paint sessions settle before their first dispatched batch", () => {
+  const ensureStart = source.indexOf("  async function ensurePaintTool(");
+  const ensureEnd = source.indexOf("\n  async function commitPaintSession", ensureStart);
+  const ensurePaintTool = source.slice(ensureStart, ensureEnd);
+
+  assert.match(ensurePaintTool, /waitForPaintSession\(true, runId\)/);
+  assert.match(ensurePaintTool, /settlePaintSessionActivation\(/);
 });
 
 test("stopping auto-paint submits pixels already pending in Wplace's session", () => {

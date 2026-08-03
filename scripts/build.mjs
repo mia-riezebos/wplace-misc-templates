@@ -9,7 +9,7 @@ const metadata = `// ==UserScript==
 // @author       You
 // @match        https://wplace.live/*
 // @run-at       document-idle
-// @grant        none
+// @grant        unsafeWindow
 // ==/UserScript==`;
 
 await build({

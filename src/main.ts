@@ -12,9 +12,17 @@ import {
 } from "./core/paint-session.ts";
 import {
   editorInputKind,
+  isFullscreenEditorClassName,
+  isSyntheticPointerCaptureError,
   isWplacePaintButtonLabel,
+  settlePaintSessionActivation,
 } from "./core/editor-session.ts";
 import { shouldRefreshMismatchOverlay } from "./core/paint-feedback.ts";
+import { templatePixelMatchesSelectedColor } from "./core/overlay-filter.ts";
+import { shouldQueuePaintPixel } from "./core/paint-target.ts";
+import { resolveHqChargeCheckpoint } from "./core/hq-charge.ts";
+import { hqClientPoint, hqPixelFromClient } from "./core/hq-coordinates.ts";
+import { waitForStableTileSnapshot } from "./core/tile-readiness.ts";
 import {
   resolveEditorColor,
   resolveTemplatePosition,
@@ -50,11 +58,43 @@ import {
   const HQ_SIZES = new Set([250, 500, 750, 1000, 1500, 2000]);
   const PROFILE_SIZE = "16x16";
   const SYNTHETIC_POINTER_ID = 9471;
+  const POINTER_CAPTURE_BRIDGE_KEY = "__waaSyntheticPointerCaptureBridge";
   const ALLIANCE_COLOR_TOLERANCE_SQUARED = 36;
   const ALLIANCE_REFRESH_GRACE_MS = 15000;
   const EDITOR_SESSION_WAIT_MS = 15000;
   const HQ_METADATA_URL = "https://backend.wplace.live/alliance/headquarters";
+  const HQ_CHARGE_SETTLE_TIMEOUT_MS = 3000;
+  const HQ_CHARGE_POLL_MS = 100;
   const UNPACED_BATCH_SIZE = 50;
+
+  const pageWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+
+  function installSyntheticPointerCaptureBridge() {
+    const prototype = pageWindow.Element?.prototype;
+    if (!prototype || prototype[POINTER_CAPTURE_BRIDGE_KEY]) return;
+    const nativeSetPointerCapture = prototype.setPointerCapture;
+    if (typeof nativeSetPointerCapture !== "function") return;
+    Object.defineProperty(prototype, POINTER_CAPTURE_BRIDGE_KEY, {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(prototype, "setPointerCapture", {
+      configurable: true,
+      writable: true,
+      value(pointerId) {
+        try {
+          return nativeSetPointerCapture.call(this, pointerId);
+        } catch (error) {
+          if (isSyntheticPointerCaptureError(
+            error?.name,
+            pointerId,
+            SYNTHETIC_POINTER_ID,
+          )) return;
+          throw error;
+        }
+      },
+    });
+  }
 
   /*
    * Wplace ships the whole DaisyUI 5 component layer, so component classes
@@ -126,7 +166,8 @@ import {
     opacity: 0.55,
     displayMode: "full",
     mismatchesOnly: false,
-    onlyUnpainted: false,
+    overlaySelectedColorOnly: false,
+    fixWrongColors: true,
     preserveView: false,
     hidden: false,
     collapsed: false,
@@ -142,7 +183,10 @@ import {
     paintColor: null,
     paintFailureMessage: null,
     hqChargesRemaining: null,
+    hqReportedCharges: null,
     paletteColors: [],
+    overlayPaletteObserver: null,
+    overlayPaletteRenderFrame: 0,
     pickerRoot: null,
     pickerPointerHandler: null,
     pickerAuxHandler: null,
@@ -579,6 +623,50 @@ import {
       context.drawImage(tile, x, y, tile.width, tile.height);
     }
     return context.getImageData(0, 0, state.width, state.height);
+  }
+
+  function hqTilePixelSignature() {
+    if (state.editorKind !== "hq" || !state.tileLayer?.isConnected) return null;
+    let hash = 2166136261;
+    let canvasCount = 0;
+    for (const canvas of state.tileLayer.querySelectorAll("canvas")) {
+      canvasCount += 1;
+      const style = canvas.getAttribute("style") || "";
+      for (let index = 0; index < style.length; index += 1) {
+        hash ^= style.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return null;
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let index = 0; index < pixels.length; index += 4) {
+        hash ^= pixels[index];
+        hash = Math.imul(hash, 16777619);
+        hash ^= pixels[index + 1];
+        hash = Math.imul(hash, 16777619);
+        hash ^= pixels[index + 2];
+        hash = Math.imul(hash, 16777619);
+        hash ^= pixels[index + 3];
+        hash = Math.imul(hash, 16777619);
+      }
+    }
+    return `${canvasCount}:${hash >>> 0}`;
+  }
+
+  async function waitForHqTilesToSettle(hqTilesBeforePaint) {
+    const root = state.root;
+    const tileLayer = state.tileLayer;
+    const result = await waitForStableTileSnapshot({
+      readSignature: () => (
+        state.root === root && state.tileLayer === tileLayer
+          ? hqTilePixelSignature()
+          : null
+      ),
+      wait,
+      requiredChangeFrom: hqTilesBeforePaint,
+      maximumSamples: Math.ceil(EDITOR_SESSION_WAIT_MS / 50),
+    });
+    return result.stable && root?.isConnected && tileLayer?.isConnected;
   }
 
   function bytesToBase64(bytes) {
@@ -1064,7 +1152,8 @@ import {
         opacity: state.opacity,
         displayMode: state.displayMode,
         mismatchesOnly: state.mismatchesOnly,
-        onlyUnpainted: state.onlyUnpainted,
+        overlaySelectedColorOnly: state.overlaySelectedColorOnly,
+        fixWrongColors: state.fixWrongColors,
       };
       if (state.editorKind === "hq") saved.indexedDb = true;
       else saved.rgba = bytesToBase64(state.target.data);
@@ -1134,7 +1223,10 @@ import {
       state.opacity = Number.isFinite(saved.opacity) ? saved.opacity : 0.55;
       state.displayMode = saved.displayMode === "center" ? "center" : "full";
       state.mismatchesOnly = Boolean(saved.mismatchesOnly);
-      state.onlyUnpainted = Boolean(saved.onlyUnpainted);
+      state.overlaySelectedColorOnly = Boolean(saved.overlaySelectedColorOnly);
+      state.fixWrongColors = typeof saved.fixWrongColors === "boolean"
+        ? saved.fixWrongColors
+        : !Boolean(saved.onlyUnpainted);
       syncControls();
       renderOverlay();
       setStatus(`Restored ${state.sourceName}.`);
@@ -1145,7 +1237,7 @@ import {
     }
   }
 
-  function renderOverlay() {
+  function renderOverlay(updateStatus = true) {
     const canvas = state.overlayCanvas;
     if (!canvas) return;
     canvas.style.opacity = String(state.opacity);
@@ -1168,6 +1260,20 @@ import {
     }
 
     const output = new ImageData(new Uint8ClampedArray(state.target.data), state.width, state.height);
+    const selectedOverlayColor = state.overlaySelectedColorOnly
+      ? readSelectedPaletteColor(state.root)
+      : null;
+    if (state.overlaySelectedColorOnly) {
+      const selectedRgb = selectedOverlayColor?.rgb || null;
+      for (let index = 0; index < output.data.length; index += 4) {
+        if (output.data[index + 3] < 64 || !templatePixelMatchesSelectedColor(
+          output.data[index],
+          output.data[index + 1],
+          output.data[index + 2],
+          selectedRgb,
+        )) output.data[index + 3] = 0;
+      }
+    }
     if (state.mismatchesOnly && !state.paintActive) {
       try {
         const actual = readEditorPixels().data;
@@ -1190,13 +1296,23 @@ import {
 
     renderOverlayImage(output, 0, 0);
     const visiblePixels = countVisiblePixels(output);
-    if (!state.paintActive) {
-      setStatus(
-        state.mismatchesOnly
-          ? `${visiblePixels.toLocaleString()} pixels still differ.`
-          : `${countVisiblePixels(state.target).toLocaleString()} template pixels.`,
-      );
+    if (!state.paintActive && updateStatus) {
+      if (state.overlaySelectedColorOnly && !selectedOverlayColor) {
+        setStatus("Open Wplace's Paint menu and select a colour to filter the overlay.", "warn");
+      } else if (state.overlaySelectedColorOnly && state.mismatchesOnly) {
+        setStatus(`${visiblePixels.toLocaleString()} selected-colour pixels still differ.`);
+      } else if (state.overlaySelectedColorOnly) {
+        setStatus(`${visiblePixels.toLocaleString()} selected-colour template pixels.`);
+      } else if (state.mismatchesOnly) {
+        setStatus(`${visiblePixels.toLocaleString()} pixels still differ.`);
+      } else {
+        setStatus(`${countVisiblePixels(state.target).toLocaleString()} template pixels.`);
+      }
     }
+  }
+
+  function refreshOverlayAfterPaint() {
+    requestAnimationFrame(() => renderOverlay(false));
   }
 
   function renderOverlayImage(imageData, offsetX, offsetY) {
@@ -1289,6 +1405,14 @@ import {
     return state.root?.closest('[role="dialog"], dialog') || null;
   }
 
+  function editorFullscreen(root = state.root) {
+    return isFullscreenEditorClassName(root?.className);
+  }
+
+  function syncPanelLayout(panel = document.getElementById(PANEL_ID), root = state.root) {
+    if (panel) panel.dataset.fullscreen = String(editorFullscreen(root));
+  }
+
   function visibleButton(button) {
     return button.getClientRects().length > 0 && button.offsetParent !== null;
   }
@@ -1311,6 +1435,10 @@ import {
     ));
   }
 
+  function paintSessionHasPendingPixels() {
+    return wplacePaintButtons(false).some((button) => !button.disabled);
+  }
+
   async function waitForPaintSession(active, runId = null) {
     const deadline = Date.now() + EDITOR_SESSION_WAIT_MS;
     while ((runId === null || runId === state.paintRunId) && Date.now() < deadline) {
@@ -1329,13 +1457,21 @@ import {
     const paintButtons = rootPaintButtons.length ? rootPaintButtons : wplacePaintButtons();
     if (paintButtons.length !== 1) return false;
     paintButtons[0].click();
-    return waitForPaintSession(true, runId);
+    if (!await waitForPaintSession(true, runId)) return false;
+    return settlePaintSessionActivation(
+      nextFrame,
+      () => (runId === null || runId === state.paintRunId) && paintSessionActive(),
+    );
   }
 
   async function commitPaintSession(runId) {
     if (state.editorKind === "profile" || !paintSessionActive()) return true;
-    const paintButtons = wplacePaintButtons();
+    const paintButtons = wplacePaintButtons(false);
     if (paintButtons.length !== 1) return false;
+    // Wplace disables Paint when every dispatched HQ event was a no-op. That
+    // is an empty checkpoint, not a submission failure; keep the session open
+    // and let the caller continue with a fresh server-reported charge budget.
+    if (paintButtons[0].disabled) return true;
     paintButtons[0].click();
     return waitForPaintSession(false, runId);
   }
@@ -1356,6 +1492,21 @@ import {
     }
   }
 
+  async function refreshHqChargeBudget(runId) {
+    const previousReportedCharges = state.hqReportedCharges;
+    const deadline = Date.now() + HQ_CHARGE_SETTLE_TIMEOUT_MS;
+    let fresh = null;
+    do {
+      await wait(HQ_CHARGE_POLL_MS);
+      if (runId !== state.paintRunId) return null;
+      fresh = await readHqCharges();
+      if (fresh && fresh.current !== previousReportedCharges) break;
+    } while (Date.now() < deadline);
+    if (!fresh) return null;
+    state.hqReportedCharges = fresh.current;
+    return resolveHqChargeCheckpoint(fresh.current);
+  }
+
   function editorPixelFromClient(clientX, clientY) {
     const rect = editorSurfaceRect();
     if (!rect) return null;
@@ -1364,6 +1515,26 @@ import {
     const y = Math.floor(((clientY - rect.top) / rect.height) * state.height);
     if (x < 0 || y < 0 || x >= state.width || y >= state.height) return null;
     return { x, y };
+  }
+
+  function hqStageViewport() {
+    if (state.editorKind !== "hq" || !state.root?.isConnected || !state.frame?.isConnected) {
+      return null;
+    }
+    const rootRect = state.root.getBoundingClientRect();
+    const frameWidth = Number.parseFloat(state.frame.style.width);
+    const scale = frameWidth / state.width;
+    if (!Number.isFinite(scale) || scale <= 0) return null;
+    const transform = new DOMMatrixReadOnly(
+      state.frame.style.transform || getComputedStyle(state.frame).transform,
+    );
+    return {
+      rootLeft: rootRect.left,
+      rootTop: rootRect.top,
+      scale,
+      translateX: transform.m41,
+      translateY: transform.m42,
+    };
   }
 
   function installTemplateColorPicker(root) {
@@ -1400,6 +1571,55 @@ import {
     root.addEventListener("auxclick", suppressAuxClick, true);
   }
 
+  function installOverlayPaletteWatcher(root) {
+    state.overlayPaletteObserver?.disconnect();
+    state.overlayPaletteObserver = null;
+    if (state.overlayPaletteRenderFrame) {
+      cancelAnimationFrame(state.overlayPaletteRenderFrame);
+      state.overlayPaletteRenderFrame = 0;
+    }
+    if (state.editorKind === "profile") return;
+
+    const container = root.closest('[role="dialog"], dialog') || root.parentElement;
+    if (!container) return;
+    const isPaletteSwatch = (element) => element instanceof HTMLButtonElement
+      && element.hasAttribute("aria-pressed")
+      && Boolean(element.style.backgroundColor);
+    const containsPaletteSwatch = (node) => {
+      if (!(node instanceof Element)) return false;
+      if (isPaletteSwatch(node)) return true;
+      return [...node.querySelectorAll("button[aria-pressed]")].some(isPaletteSwatch);
+    };
+    const scheduleOverlayRender = () => {
+      if (!state.overlaySelectedColorOnly || state.paintActive || state.overlayPaletteRenderFrame) {
+        return;
+      }
+      state.overlayPaletteRenderFrame = requestAnimationFrame(() => {
+        state.overlayPaletteRenderFrame = 0;
+        requestAnimationFrame(renderOverlay);
+      });
+    };
+
+    state.overlayPaletteObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === "attributes" && isPaletteSwatch(record.target)) {
+          scheduleOverlayRender();
+          return;
+        }
+        if (record.type === "childList" && [...record.addedNodes].some(containsPaletteSwatch)) {
+          scheduleOverlayRender();
+          return;
+        }
+      }
+    });
+    state.overlayPaletteObserver.observe(container, {
+      attributes: true,
+      attributeFilter: ["aria-pressed", "data-state", "data-selected", "class"],
+      childList: true,
+      subtree: true,
+    });
+  }
+
   function pixelMatchesColor(pixelData, index, color) {
     if (pixelData[index + 3] !== 255) return false;
     const redDelta = pixelData[index] - color.rgb[0];
@@ -1415,7 +1635,7 @@ import {
       const pixel = state.baseCanvas.getContext("2d", { willReadFrequently: true })
         .getImageData(item.x, item.y, 1, 1).data;
       if (pixelMatchesColor(pixel, 0, item.color)) return "matches";
-      if (state.onlyUnpainted && pixel[3] !== 0) return "protected";
+      if (!state.fixWrongColors && pixel[3] !== 0) return "protected";
       return "paint";
     } catch (error) {
       console.warn(`${SCRIPT_ID}: could not read an editor pixel`, error);
@@ -1446,9 +1666,13 @@ import {
         );
         if (!color) continue;
         if (onlyColor && colorKey(color) !== colorKey(onlyColor)) continue;
-        if (state.onlyUnpainted && actual[index + 3] !== 0) continue;
         const matches = pixelMatchesColor(actual, index, color);
-        if (!matches) {
+        const disposition = matches
+          ? "matching"
+          : actual[index + 3] === 0
+          ? "transparent"
+          : "wrong-colour";
+        if (shouldQueuePaintPixel(disposition, state.fixWrongColors)) {
           const key = colorKey(color);
           if (!buckets.has(key)) buckets.set(key, []);
           buckets.get(key).push({ x, y, color });
@@ -1604,8 +1828,23 @@ import {
     const rect = editorSurfaceRect();
     const target = paintEventTarget();
     if (!rect?.width || !rect.height || !target) return false;
-    const clientX = rect.left + ((item.x + 0.5) / state.width) * rect.width;
-    const clientY = rect.top + ((item.y + 0.5) / state.height) * rect.height;
+    let clientX;
+    let clientY;
+    if (state.editorKind === "hq") {
+      const viewport = hqStageViewport();
+      if (!viewport) return false;
+      const client = hqClientPoint(item, viewport);
+      const resolved = hqPixelFromClient(client, viewport);
+      if (resolved.x !== item.x || resolved.y !== item.y) {
+        state.paintFailureMessage = `HQ coordinate safety check rejected pixel ${item.x}, ${item.y}.`;
+        return false;
+      }
+      clientX = client.x;
+      clientY = client.y;
+    } else {
+      clientX = rect.left + ((item.x + 0.5) / state.width) * rect.width;
+      clientY = rect.top + ((item.y + 0.5) / state.height) * rect.height;
+    }
     const mouse = {
       bubbles: true,
       cancelable: true,
@@ -1616,7 +1855,7 @@ import {
     };
 
     if (editorInputKind(state.editorKind) === "profile") {
-      target.dispatchEvent(new MouseEvent("click", { ...mouse, buttons: 0 }));
+      target.dispatchEvent(new pageWindow.MouseEvent("click", { ...mouse, buttons: 0 }));
       return true;
     }
 
@@ -1628,9 +1867,9 @@ import {
     };
 
     return withSyntheticPointerCapture(state.root, () => {
-      target.dispatchEvent(new PointerEvent("pointermove", { ...pointer, buttons: 0 }));
-      target.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
-      target.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 }));
+      target.dispatchEvent(new pageWindow.PointerEvent("pointermove", { ...pointer, buttons: 0 }));
+      target.dispatchEvent(new pageWindow.PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
+      target.dispatchEvent(new pageWindow.PointerEvent("pointerup", { ...pointer, buttons: 0 }));
       return true;
     });
   }
@@ -1655,7 +1894,14 @@ import {
       if (paintEventTarget() !== dispatchedSurface || !dispatchedSurface?.isConnected) {
         return { ok: true, dispatched, refreshed: true };
       }
-      if (!dispatchPaintEvents(item)) return { ok: false, dispatched, failedItem: item };
+      if (!dispatchPaintEvents(item)) {
+        return {
+          ok: false,
+          dispatched,
+          failedItem: item,
+          message: state.paintFailureMessage,
+        };
+      }
       dispatched += 1;
       if (state.editorKind === "hq") state.hqChargesRemaining -= 1;
     }
@@ -1667,6 +1913,8 @@ import {
     const pause = document.getElementById(`${PANEL_ID}-paint-pause`);
     const stop = document.getElementById(`${PANEL_ID}-paint-stop`);
     const interval = document.getElementById(`${PANEL_ID}-paint-interval`);
+    const fixWrongColors = document.getElementById(`${PANEL_ID}-fix-wrong-colours`);
+    const overlaySelectedColour = document.getElementById(`${PANEL_ID}-overlay-selected-colour`);
     const selectedColorOnly = document.getElementById(`${PANEL_ID}-selected-color-only`);
     const paintPath = document.getElementById(`${PANEL_ID}-paint-path`);
     const delay = document.getElementById(`${PANEL_ID}-paint-delay`);
@@ -1686,6 +1934,11 @@ import {
     }
     if (stop) stop.disabled = !state.paintActive;
     if (interval) interval.checked = state.paintIntervalEnabled;
+    if (fixWrongColors) {
+      fixWrongColors.checked = state.fixWrongColors;
+      fixWrongColors.disabled = state.paintActive;
+    }
+    if (overlaySelectedColour) overlaySelectedColour.disabled = state.paintActive;
     if (selectedColorOnly) {
       selectedColorOnly.checked = state.paintSelectedColorOnly;
       selectedColorOnly.disabled = state.paintActive;
@@ -1710,6 +1963,7 @@ import {
     state.paintColor = null;
     state.paintFailureMessage = null;
     state.hqChargesRemaining = null;
+    state.hqReportedCharges = null;
     syncPaintControls();
     if (message) setStatus(message);
   }
@@ -1818,9 +2072,20 @@ import {
       );
       return;
     }
+    const hqPaintSessionWasActive = isHq && paintSessionActive();
+    const hqTilesBeforePaint = isHq && !hqPaintSessionWasActive
+      ? hqTilePixelSignature()
+      : undefined;
     if (!isProfile && !await ensurePaintTool()) {
       setStatus(`Could not activate Wplace's ${isHq ? "HQ" : "alliance"} Paint tool.`, "warn");
       return;
+    }
+    if (isHq) {
+      setStatus("Waiting for Wplace's HQ tiles to finish rendering…");
+      if (!await waitForHqTilesToSettle(hqTilesBeforePaint)) {
+        setStatus("Wplace's HQ tiles did not finish rendering; auto-paint did not start.", "warn");
+        return;
+      }
     }
     const paletteEditor = isAlliance || isHq;
     const lockedColor = paletteEditor && state.paintSelectedColorOnly
@@ -1835,8 +2100,8 @@ import {
       setStatus(
         lockedColor
           ? `No ${colorLabel(lockedColor)} template pixels need painting.`
-          : state.onlyUnpainted
-          ? "No transparent editor pixels need painting. Existing pixels were left untouched."
+          : !state.fixWrongColors
+          ? "No transparent editor pixels need painting. Existing colours were left unchanged."
           : "This asset already matches the template.",
       );
       return;
@@ -1854,6 +2119,7 @@ import {
     state.paintColor = null;
     state.paintFailureMessage = null;
     state.hqChargesRemaining = hqCharges?.current ?? null;
+    state.hqReportedCharges = hqCharges?.current ?? null;
     syncPaintControls();
     let dispatchedCount = 0;
     let dispatchedSinceRecycle = 0;
@@ -1905,6 +2171,8 @@ import {
         state.paintIndex += result.dispatched;
       }
       if (result.outOfCharges) {
+        await nextFrame();
+        const hadPendingPixels = paintSessionHasPendingPixels();
         const committed = await commitPaintSession(runId);
         if (runId !== state.paintRunId) return;
         if (!committed) {
@@ -1913,8 +2181,31 @@ import {
           setStatus("Could not submit Wplace's pending HQ paint session. Paused; use Resume to retry.", "warn");
           continue;
         }
-        stopAutoFill("HQ charges exhausted; auto-paint stopped.");
-        return;
+        const checkpoint = hadPendingPixels
+          ? await refreshHqChargeBudget(runId)
+          : resolveHqChargeCheckpoint(state.hqReportedCharges ?? 0);
+        if (runId !== state.paintRunId) return;
+        if (!checkpoint) {
+          state.paintPaused = true;
+          syncPaintControls();
+          setStatus("Could not refresh Wplace's HQ charge counter. Paused; use Resume to retry.", "warn");
+          continue;
+        }
+        if (checkpoint.exhausted) {
+          stopAutoFill("HQ charges exhausted; auto-paint stopped.");
+          return;
+        }
+        state.hqChargesRemaining = checkpoint.nextDispatchBudget;
+        setStatus(
+          `Wplace reports ${checkpoint.nextDispatchBudget.toLocaleString()} HQ charges remaining; continuing…`,
+        );
+        if (!await ensurePaintTool(runId)) {
+          if (runId !== state.paintRunId) return;
+          state.paintPaused = true;
+          syncPaintControls();
+          setStatus("Could not reopen Wplace's HQ Paint tool. Paused; use Resume to retry.", "warn");
+        }
+        continue;
       }
       if (result.refreshed) continue;
       if (!result.ok) {
@@ -1984,6 +2275,7 @@ import {
       state.paintColor = null;
       state.paintFailureMessage = null;
       syncPaintControls();
+      refreshOverlayAfterPaint();
       setStatus(
         `Auto-paint complete: ${dispatchedCount.toLocaleString()} events dispatched. `
         + "Use Refresh or start Auto-paint again to rescan the canvas.",
@@ -1996,7 +2288,8 @@ import {
     const opacityValue = document.getElementById(`${PANEL_ID}-opacity-value`);
     const displayMode = document.getElementById(`${PANEL_ID}-display-mode`);
     const mismatch = document.getElementById(`${PANEL_ID}-mismatch`);
-    const onlyUnpainted = document.getElementById(`${PANEL_ID}-only-unpainted`);
+    const overlaySelectedColour = document.getElementById(`${PANEL_ID}-overlay-selected-colour`);
+    const fixWrongColors = document.getElementById(`${PANEL_ID}-fix-wrong-colours`);
     const selectedColorOnly = document.getElementById(`${PANEL_ID}-selected-color-only`);
     const paintPath = document.getElementById(`${PANEL_ID}-paint-path`);
     const preserveView = document.getElementById(`${PANEL_ID}-preserve-view`);
@@ -2014,7 +2307,8 @@ import {
     if (opacityValue) opacityValue.textContent = `${Math.round(state.opacity * 100)}%`;
     if (displayMode) displayMode.value = state.displayMode;
     if (mismatch) mismatch.checked = state.mismatchesOnly;
-    if (onlyUnpainted) onlyUnpainted.checked = state.onlyUnpainted;
+    if (overlaySelectedColour) overlaySelectedColour.checked = state.overlaySelectedColorOnly;
+    if (fixWrongColors) fixWrongColors.checked = state.fixWrongColors;
     if (selectedColorOnly) selectedColorOnly.checked = state.paintSelectedColorOnly;
     if (paintPath) {
       paintPath.value = state.paintPath;
@@ -2148,6 +2442,25 @@ import {
         margin-top: 0;
         margin-bottom: 0.5rem;
       }
+      #${PANEL_ID}[data-fullscreen="true"] {
+        position: fixed;
+        top: 5rem;
+        left: 1rem;
+        z-index: 45;
+        width: min(27rem, calc(100vw - 2rem));
+        max-height: calc(100dvh - 6rem);
+        margin: 0;
+        overflow: hidden;
+        box-shadow: 0 18px 50px rgb(0 0 0 / 0.24);
+      }
+      #${PANEL_ID}[data-fullscreen="true"] .waa-collapsible {
+        max-height: calc(100dvh - 11rem);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+      #${PANEL_ID}[data-fullscreen="true"][data-collapsed="true"] {
+        width: min(24rem, calc(100vw - 2rem));
+      }
       #${PANEL_ID}[data-collapsed="true"] .waa-collapsible { display: none; }
       #${PANEL_ID} .waa-groups { column-gap: 2rem; row-gap: 1rem; }
       #${PANEL_ID} .waa-group { flex: 0 1 19rem; min-width: 13rem; }
@@ -2214,11 +2527,11 @@ import {
     const panel = document.createElement("section");
     panel.id = PANEL_ID;
     panel.dataset.collapsed = String(state.collapsed);
-    panel.dataset.collapsed = String(state.collapsed);
     panel.dataset.editor = state.editorKind;
     panel.dataset.hqAutoPaint = String(ENABLE_HQ_AUTO_PAINT);
     panel.dataset.version = SCRIPT_VERSION;
     panel.className = "border-base-200 bg-base-100 mt-3 shrink-0 rounded-2xl border p-3";
+    syncPanelLayout(panel, root);
     panel.innerHTML = `
       <div class="waa-head flex flex-wrap items-center gap-2">
         <div class="min-w-0 flex-1">
@@ -2280,6 +2593,10 @@ import {
                 <input class="toggle toggle-xs" id="${PANEL_ID}-mismatch" type="checkbox">
                 <span class="text-base-content/85 text-xs">Only differences</span>
               </label>
+              <label class="waa-palette flex cursor-pointer items-center gap-1.5" title="Show only template pixels matching Wplace's selected paint colour">
+                <input class="toggle toggle-xs" id="${PANEL_ID}-overlay-selected-colour" type="checkbox">
+                <span class="text-base-content/85 text-xs">Only selected colour</span>
+              </label>
             </div>
             <label class="waa-alliance flex cursor-pointer items-center gap-1.5" title="Restore zoom and canvas position when Wplace replaces the artboard">
               <input class="toggle toggle-xs" id="${PANEL_ID}-preserve-view" type="checkbox">
@@ -2319,9 +2636,9 @@ import {
               </div>
             </div>
             <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <label class="flex cursor-pointer items-center gap-1.5" title="Never overwrite a pixel that already has a color">
-                <input class="toggle toggle-xs" id="${PANEL_ID}-only-unpainted" type="checkbox">
-                <span class="text-base-content/85 text-xs">Keep existing pixels</span>
+              <label class="flex cursor-pointer items-center gap-1.5" title="Correct template pixels that already have a different colour">
+                <input class="toggle toggle-xs" id="${PANEL_ID}-fix-wrong-colours" type="checkbox" checked>
+                <span class="text-base-content/85 text-xs">Fix wrong colours</span>
               </label>
               <label class="waa-palette flex cursor-pointer items-center gap-1.5" title="Paint only template pixels matching the Wplace color selected when auto-paint starts">
                 <input class="toggle toggle-xs" id="${PANEL_ID}-selected-color-only" type="checkbox">
@@ -2375,13 +2692,18 @@ import {
       persistTarget();
       renderOverlay();
     });
-    panel.querySelector(`#${PANEL_ID}-only-unpainted`).addEventListener("change", (event) => {
-      state.onlyUnpainted = event.target.checked;
+    panel.querySelector(`#${PANEL_ID}-overlay-selected-colour`).addEventListener("change", (event) => {
+      state.overlaySelectedColorOnly = event.target.checked;
+      persistTarget();
+      renderOverlay();
+    });
+    panel.querySelector(`#${PANEL_ID}-fix-wrong-colours`).addEventListener("change", (event) => {
+      state.fixWrongColors = event.target.checked;
       persistTarget();
       setStatus(
-        state.onlyUnpainted
-          ? "Auto-paint will only paint fully transparent editor pixels."
-          : "Auto-paint may replace pixels whose colors differ.",
+        state.fixWrongColors
+          ? "Auto-paint will fill transparent pixels and correct colours that differ."
+          : "Auto-paint will fill transparent pixels and leave existing colours unchanged.",
       );
     });
     panel.querySelector(`#${PANEL_ID}-selected-color-only`).addEventListener("change", (event) => {
@@ -2492,7 +2814,9 @@ import {
       || state.editorKind !== editor.kind
       || state.width !== editor.width
       || state.height !== editor.height;
-    if (!changedEditor && document.getElementById(PANEL_ID) && state.overlayCanvas?.isConnected) return;
+    const existingPanel = document.getElementById(PANEL_ID);
+    syncPanelLayout(existingPanel, editor.root);
+    if (!changedEditor && existingPanel && state.overlayCanvas?.isConnected) return;
 
     if (state.paintActive && !sameAsset) stopAutoFill("The asset editor changed; auto-paint stopped.");
     if (changedEditor && state.templateMoveActive) finishTemplateMoveState();
@@ -2517,6 +2841,7 @@ import {
     injectStyles();
     buildPanel(editor.root);
     installTemplateColorPicker(editor.root);
+    installOverlayPaletteWatcher(editor.root);
     installViewportCapture(editor.root, editor.frame);
     if (!sameAsset || !state.target) await restoreTarget();
     renderOverlay();
@@ -2544,6 +2869,12 @@ import {
   }
 
   const observer = new MutationObserver(queueScan);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["class"],
+    childList: true,
+    subtree: true,
+  });
+  installSyntheticPointerCaptureBridge();
   restoreSettings();
   queueScan();
