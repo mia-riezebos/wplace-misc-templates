@@ -1152,7 +1152,6 @@ import {
         opacity: state.opacity,
         displayMode: state.displayMode,
         mismatchesOnly: state.mismatchesOnly,
-        overlaySelectedColorOnly: state.overlaySelectedColorOnly,
         fixWrongColors: state.fixWrongColors,
       };
       if (state.editorKind === "hq") saved.indexedDb = true;
@@ -1171,6 +1170,7 @@ import {
     finishTemplateMoveState();
     state.target = null;
     state.templateSource = null;
+    state.overlaySelectedColorOnly = false;
     try {
       if (state.editorKind === "hq") {
         await reclaimLegacyHqTemplates();
@@ -1223,7 +1223,6 @@ import {
       state.opacity = Number.isFinite(saved.opacity) ? saved.opacity : 0.55;
       state.displayMode = saved.displayMode === "center" ? "center" : "full";
       state.mismatchesOnly = Boolean(saved.mismatchesOnly);
-      state.overlaySelectedColorOnly = Boolean(saved.overlaySelectedColorOnly);
       state.fixWrongColors = typeof saved.fixWrongColors === "boolean"
         ? saved.fixWrongColors
         : !Boolean(saved.onlyUnpainted);

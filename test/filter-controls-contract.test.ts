@@ -12,10 +12,18 @@ test("auto-paint exposes a positive wrong-colour repair toggle", () => {
   assert.match(source, /shouldQueuePaintPixel\(/);
 });
 
-test("overlay exposes and persists a selected-colour-only filter", () => {
+test("overlay exposes a session-only selected-colour filter that restores off", () => {
+  const persistStart = source.indexOf("  function persistTarget()");
+  const persistEnd = source.indexOf("\n  async function restoreTarget()", persistStart);
+  const persistTarget = source.slice(persistStart, persistEnd);
+  const restoreStart = persistEnd;
+  const restoreEnd = source.indexOf("\n  function renderOverlay(", restoreStart);
+  const restoreTarget = source.slice(restoreStart, restoreEnd);
+
   assert.match(source, /id="\$\{PANEL_ID\}-overlay-selected-colour"/);
   assert.match(source, />Only selected colour</);
-  assert.match(source, /overlaySelectedColorOnly: state\.overlaySelectedColorOnly/);
+  assert.doesNotMatch(persistTarget, /overlaySelectedColorOnly/);
+  assert.match(restoreTarget, /state\.overlaySelectedColorOnly = false/);
   assert.match(source, /templatePixelMatchesSelectedColor\(/);
 });
 
