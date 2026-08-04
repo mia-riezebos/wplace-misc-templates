@@ -1,6 +1,6 @@
 {
   "name": "wplace-misc-templates",
-  "version": "0.7.9",
+  "version": "0.7.10",
   "private": true,
   "packageManager": "pnpm@11.20.0",
   "type": "module",
